@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: kindship
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: kindship
+    main: ./main.go
+    binary: kindship
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/kindship-ai/kindship-cli/cmd.Version={{.Version}}
+      - -X github.com/kindship-ai/kindship-cli/cmd.GitCommit={{.Commit}}
+      - -X github.com/kindship-ai/kindship-cli/cmd.BuildDate={{.Date}}
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+# Homebrew tap
+brews:
+  - name: kindship
+    repository:
+      owner: kindship-ai
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://kindship.ai/cli"
+    description: "Orchestrator for AI Coding Agents - Claude Code, Gemini CLI, Codex, OpenCode"
+    license: "Proprietary"
+    install: |
+      bin.install "kindship"
+    test: |
+      system "#{bin}/kindship", "version"
+
+# Release configuration
+release:
+  github:
+    owner: kindship-ai
+    name: kindship-cli
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"

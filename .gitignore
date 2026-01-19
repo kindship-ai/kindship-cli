@@ -1,0 +1,21 @@
+# Binaries
+kindship
+kindship-*
+*.exe
+
+# Build artifacts
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+coverage.out
