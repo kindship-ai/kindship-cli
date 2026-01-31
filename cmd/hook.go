@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/kindship-ai/kindship-cli/internal/api"
 	"github.com/kindship-ai/kindship-cli/internal/auth"
 	"github.com/kindship-ai/kindship-cli/internal/config"
 
@@ -156,7 +157,7 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func fetchNextTask(ctx *auth.Context, agentID string) (*TaskInfo, error) {
+func fetchNextTask(ctx *auth.Context, agentID string) (*api.TaskInfo, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/plan/next?agent_id=%s", ctx.APIBaseURL, agentID)
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
@@ -180,7 +181,7 @@ func fetchNextTask(ctx *auth.Context, agentID string) (*TaskInfo, error) {
 		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var nextResp PlanNextResponse
+	var nextResp api.PlanNextResponse
 	if err := json.NewDecoder(resp.Body).Decode(&nextResp); err != nil {
 		return nil, err
 	}

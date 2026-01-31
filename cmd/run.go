@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -18,14 +19,18 @@ var (
 	apiURL     string
 )
 
+// ErrAskUserSkipped is returned when an ASK_USER task is started but not
+// blocked on — the loop should move to the next task.
+var ErrAskUserSkipped = errors.New("ASK_USER task started, awaiting user response")
+
 var runCmd = &cobra.Command{
 	Use:   "run <entity-id>",
 	Short: "Execute a planning entity",
 	Long: `Execute a planning entity by UUID.
 
 The command fetches the entity details from the API, executes it based on its
-execution_mode (currently only LLM_REASONING is supported), and reports the
-results back to the API.
+execution_mode (LLM_REASONING, BASH, PYTHON, etc.), and reports the results
+back to the API.
 
 Configuration (flags take precedence over environment variables):
   --agent-id / AGENT_ID - The agent container ID
@@ -46,7 +51,6 @@ Examples:
 }
 
 func runExecute(cmd *cobra.Command, args []string) error {
-	startTime := time.Now()
 	entityID := args[0]
 
 	// Read from flags first, fall back to environment variables
@@ -67,10 +71,6 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	log := logging.Init(agentID, "run", verbose)
 	defer log.FlushSync()
 
-	log.Info("Starting entity execution", map[string]interface{}{
-		"entity_id": entityID,
-	})
-
 	// Validate required parameters
 	if agentID == "" {
 		log.Error("AGENT_ID not provided", nil)
@@ -84,15 +84,60 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	// Create API client
 	client := api.NewClient(apiURL, verbose)
 
+	success, err := executeEntity(EntityExecutionParams{
+		EntityID:   entityID,
+		AgentID:    agentID,
+		ServiceKey: serviceKey,
+		Client:     client,
+		Log:        log,
+	})
+
+	if err != nil {
+		if errors.Is(err, ErrAskUserSkipped) {
+			log.Info("ASK_USER task started, awaiting user response via UI")
+			return nil
+		}
+		return err
+	}
+
+	if !success {
+		os.Exit(1)
+	}
+
+	return nil
+}
+
+// EntityExecutionParams holds parameters for executing an entity.
+// Used by both `kindship run <id>` and the agent loop.
+type EntityExecutionParams struct {
+	EntityID   string
+	AgentID    string
+	ServiceKey string
+	Client     *api.Client
+	Log        *logging.Logger
+}
+
+// executeEntity runs the full execution lifecycle for a single entity.
+// Returns (true, nil) on success, (false, nil) on execution failure (non-zero exit),
+// and (false, err) on infrastructure errors.
+// Returns (false, ErrAskUserSkipped) for ASK_USER mode tasks.
+func executeEntity(params EntityExecutionParams) (bool, error) {
+	startTime := time.Now()
+	log := params.Log
+
+	log.Info("Starting entity execution", map[string]interface{}{
+		"entity_id": params.EntityID,
+	})
+
 	// Step 1: Fetch entity details
 	log.Info("Fetching entity details")
 	fetchStart := time.Now()
-	entityResp, err := client.FetchEntityForExecution(entityID, serviceKey)
+	entityResp, err := params.Client.FetchEntityForExecution(params.EntityID, params.ServiceKey)
 	if err != nil {
 		log.Error("Failed to fetch entity", err, map[string]interface{}{
 			"duration_ms": time.Since(fetchStart).Milliseconds(),
 		})
-		return fmt.Errorf("failed to fetch entity: %w", err)
+		return false, fmt.Errorf("failed to fetch entity: %w", err)
 	}
 	log.WithDuration("Fetched entity", time.Since(fetchStart), map[string]interface{}{
 		"title":          entityResp.Entity.Title,
@@ -112,7 +157,7 @@ func runExecute(cmd *cobra.Command, args []string) error {
 		log.Error("Dependencies not met", nil, map[string]interface{}{
 			"pending": entityResp.DependenciesStatus.Pending,
 		})
-		return fmt.Errorf("dependencies not met: %v", entityResp.DependenciesStatus.Pending)
+		return false, fmt.Errorf("dependencies not met: %v", entityResp.DependenciesStatus.Pending)
 	}
 
 	// Step 2b: Validate inputs against input_schema if provided
@@ -120,7 +165,7 @@ func runExecute(cmd *cobra.Command, args []string) error {
 		log.Info("Validating inputs against input_schema")
 		if err := validator.ValidateInputs(entityResp.Inputs, entityResp.Entity.InputSchema); err != nil {
 			log.Error("Input validation failed", err)
-			return fmt.Errorf("input validation failed: %w", err)
+			return false, fmt.Errorf("input validation failed: %w", err)
 		}
 		log.Info("Input validation passed")
 	}
@@ -128,21 +173,30 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	// Step 3: Create run
 	log.Info("Creating run")
 	startExecReq := api.ExecutionStartRequest{
-		EntityID:      entityID,
+		EntityID:      params.EntityID,
 		ExecutionMode: entityResp.Entity.ExecutionMode,
-		AgentID:       agentID, // Agent executing the run
+		AgentID:       params.AgentID,
 	}
-	startResp, err := client.StartExecution(startExecReq, serviceKey)
+	startResp, err := params.Client.StartExecution(startExecReq, params.ServiceKey)
 	if err != nil {
 		log.Error("Failed to start execution", err)
-		return fmt.Errorf("failed to start execution: %w", err)
+		return false, fmt.Errorf("failed to start execution: %w", err)
 	}
 	log.Info("Run created", map[string]interface{}{
-		"execution_id":    startResp.ExecutionID,
-		"attempt_number":  startResp.AttemptNumber,
+		"execution_id":   startResp.ExecutionID,
+		"attempt_number": startResp.AttemptNumber,
 	})
 
 	executionID := startResp.ExecutionID
+
+	// ASK_USER: create the run (RUNNING) but don't block — user responds via UI
+	if entityResp.Entity.ExecutionMode == api.ExecutionModeAskUser {
+		log.Info("ASK_USER task started, not blocking", map[string]interface{}{
+			"execution_id": executionID,
+			"entity_id":    params.EntityID,
+		})
+		return false, ErrAskUserSkipped
+	}
 
 	// Step 4: Execute based on execution mode
 	log.Info("Executing entity", map[string]interface{}{
@@ -154,17 +208,21 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	switch entityResp.Entity.ExecutionMode {
 	case api.ExecutionModeLLMReasoning:
 		result = executor.ExecuteLLM(&entityResp.Entity, startResp.Inputs)
+	case api.ExecutionModeBash:
+		result = executor.ExecuteBash(&entityResp.Entity, startResp.Inputs)
+	case api.ExecutionModePython:
+		result = executor.ExecutePython(&entityResp.Entity, startResp.Inputs)
 	case api.ExecutionModePythonSandbox:
-		log.Error("PYTHON_SANDBOX mode not yet implemented", nil)
-		return fmt.Errorf("PYTHON_SANDBOX execution mode not yet implemented")
+		// Legacy mode — treat as PYTHON
+		result = executor.ExecutePython(&entityResp.Entity, startResp.Inputs)
 	case api.ExecutionModeHybrid:
-		log.Error("HYBRID mode not yet implemented", nil)
-		return fmt.Errorf("HYBRID execution mode not yet implemented")
+		// HYBRID uses LLM with entity context + code as reference
+		result = executor.ExecuteLLM(&entityResp.Entity, startResp.Inputs)
 	default:
 		log.Error("Unknown execution mode", nil, map[string]interface{}{
 			"mode": entityResp.Entity.ExecutionMode,
 		})
-		return fmt.Errorf("unknown execution mode: %s", entityResp.Entity.ExecutionMode)
+		return false, fmt.Errorf("unknown execution mode: %s", entityResp.Entity.ExecutionMode)
 	}
 
 	execDuration := time.Since(execStart)
@@ -297,10 +355,10 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	log.Info("Completing execution", map[string]interface{}{
 		"status": completeReq.Status,
 	})
-	_, err = client.CompleteExecution(executionID, completeReq, serviceKey)
+	_, err = params.Client.CompleteExecution(executionID, completeReq, params.ServiceKey)
 	if err != nil {
 		log.Error("Failed to complete execution", err)
-		return fmt.Errorf("failed to complete execution: %w", err)
+		return false, fmt.Errorf("failed to complete execution: %w", err)
 	}
 
 	totalDuration := time.Since(startTime)
@@ -309,12 +367,7 @@ func runExecute(cmd *cobra.Command, args []string) error {
 		"execution_id": executionID,
 	})
 
-	// Exit with the same code as the execution
-	if !result.Success {
-		os.Exit(result.ExitCode)
-	}
-
-	return nil
+	return result.Success, nil
 }
 
 func init() {

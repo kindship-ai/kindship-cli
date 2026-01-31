@@ -142,7 +142,7 @@ func (c *Client) FetchEntityForExecution(entityID, serviceKey string) (*EntityEx
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", serviceKey))
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "kindship-cli/1.0")
 
@@ -185,7 +185,7 @@ func (c *Client) StartExecution(req ExecutionStartRequest, serviceKey string) (*
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", serviceKey))
+	httpReq.Header.Set("X-Kindship-Service-Key", serviceKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "kindship-cli/1.0")
@@ -229,7 +229,7 @@ func (c *Client) CompleteExecution(executionID string, req ExecutionCompleteRequ
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", serviceKey))
+	httpReq.Header.Set("X-Kindship-Service-Key", serviceKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "kindship-cli/1.0")
@@ -256,4 +256,112 @@ func (c *Client) CompleteExecution(executionID string, req ExecutionCompleteRequ
 
 	c.log("Execution completed successfully")
 	return &completeResp, nil
+}
+
+// FetchNextTask gets the next runnable task for an agent.
+// Uses X-Kindship-Service-Key header for /api/cli/* endpoints.
+func (c *Client) FetchNextTask(agentID, serviceKey string) (*PlanNextResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/plan/next", c.baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("agent_id", agentID)
+	u.RawQuery = q.Encode()
+
+	c.log("Fetching next task for agent: %s", agentID)
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp PlanNextResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var nextResp PlanNextResponse
+	if err := json.Unmarshal(body, &nextResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if nextResp.Task != nil {
+		c.log("Next task: %s (%s)", nextResp.Task.Title, nextResp.Task.ID)
+	} else {
+		c.log("No runnable tasks available")
+	}
+
+	return &nextResp, nil
+}
+
+// AbandonStaleRuns marks orphaned RUNNING runs as ABANDONED.
+// Uses X-Kindship-Service-Key header for /api/cli/* endpoints.
+func (c *Client) AbandonStaleRuns(agentID, serviceKey string) (*AbandonStaleResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/agent/abandon-stale", c.baseURL)
+	c.log("Abandoning stale runs for agent: %s", agentID)
+
+	reqBody := struct {
+		AgentID string `json:"agent_id"`
+	}{AgentID: agentID}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp AbandonStaleResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var abandonResp AbandonStaleResponse
+	if err := json.Unmarshal(body, &abandonResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Abandoned %d stale runs", abandonResp.AbandonedCount)
+	return &abandonResp, nil
 }

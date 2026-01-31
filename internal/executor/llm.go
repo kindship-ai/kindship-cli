@@ -24,7 +24,8 @@ func ExecuteLLM(entity *api.PlanningEntity, inputs map[string]interface{}) *Exec
 	prompt := buildPrompt(entity, inputs)
 
 	// Execute Claude Code with the prompt
-	cmd := exec.Command("claude", "--prompt", prompt)
+	// Use -p flag for headless prompt mode (not --prompt which doesn't exist)
+	cmd := exec.Command("claude", "-p", prompt)
 	cmd.Dir = "/workspace"
 
 	var stdout, stderr bytes.Buffer

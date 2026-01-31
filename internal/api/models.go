@@ -9,6 +9,9 @@ const (
 	ExecutionModeLLMReasoning  ExecutionMode = "LLM_REASONING"
 	ExecutionModePythonSandbox ExecutionMode = "PYTHON_SANDBOX"
 	ExecutionModeHybrid        ExecutionMode = "HYBRID"
+	ExecutionModeBash          ExecutionMode = "BASH"
+	ExecutionModePython        ExecutionMode = "PYTHON"
+	ExecutionModeAskUser       ExecutionMode = "ASK_USER"
 )
 
 // ExecutionAttemptStatus represents the status of an execution attempt
@@ -66,6 +69,8 @@ type PlanningEntity struct {
 	ParentID             *string                `json:"parent_id"`
 	Rationale            *string                `json:"rationale"`
 	AccountID            string                 `json:"account_id"`
+	Code                 *string                `json:"code"`
+	Boundaries           map[string]interface{} `json:"boundaries"`
 	CreatedAt            time.Time              `json:"created_at"`
 	UpdatedAt            time.Time              `json:"updated_at"`
 }
@@ -135,4 +140,35 @@ type ExecutionCompleteRequest struct {
 type ExecutionCompleteResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message,omitempty"`
+}
+
+// PlanNextResponse is the response from plan/next
+type PlanNextResponse struct {
+	Task         *TaskInfo `json:"task"`
+	Message      string    `json:"message,omitempty"`
+	PendingCount int       `json:"pending_count,omitempty"`
+	Error        string    `json:"error,omitempty"`
+}
+
+// TaskInfo represents a task from the plan/next API
+type TaskInfo struct {
+	ID                  string                 `json:"id"`
+	Title               string                 `json:"title"`
+	Description         string                 `json:"description"`
+	Rationale           string                 `json:"rationale,omitempty"`
+	SuccessCriteria     map[string]interface{} `json:"success_criteria"`
+	InputSchema         map[string]interface{} `json:"input_schema"`
+	OutputSchema        map[string]interface{} `json:"output_schema"`
+	ExecutionMode       string                 `json:"execution_mode"`
+	Code                *string                `json:"code,omitempty"`
+	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
+	Dependencies        []string               `json:"dependencies"`
+	DependenciesLabeled map[string]string      `json:"dependencies_labeled"`
+	SequenceOrder       int                    `json:"sequence_order"`
+}
+
+// AbandonStaleResponse is the response from the abandon-stale endpoint
+type AbandonStaleResponse struct {
+	AbandonedCount int    `json:"abandoned_count"`
+	Error          string `json:"error,omitempty"`
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/kindship-ai/kindship-cli/internal/api"
 	"github.com/kindship-ai/kindship-cli/internal/auth"
 
 	"github.com/spf13/cobra"
@@ -110,28 +111,6 @@ type PlanSubmitResponse struct {
 	} `json:"tasks"`
 	ObjectiveID string `json:"objective_id"`
 	Error       string `json:"error,omitempty"`
-}
-
-// PlanNextResponse is the response from plan/next
-type PlanNextResponse struct {
-	Task    *TaskInfo `json:"task"`
-	Message string    `json:"message,omitempty"`
-	Error   string    `json:"error,omitempty"`
-}
-
-// TaskInfo represents a task from the API
-type TaskInfo struct {
-	ID                  string                 `json:"id"`
-	Title               string                 `json:"title"`
-	Description         string                 `json:"description"`
-	Rationale           string                 `json:"rationale"`
-	SuccessCriteria     map[string]interface{} `json:"success_criteria"`
-	InputSchema         map[string]interface{} `json:"input_schema"`
-	OutputSchema        map[string]interface{} `json:"output_schema"`
-	ExecutionMode       string                 `json:"execution_mode"`
-	Dependencies        []string               `json:"dependencies"`
-	DependenciesLabeled map[string]string      `json:"dependencies_labeled"`
-	SequenceOrder       int                    `json:"sequence_order"`
 }
 
 func runPlanSubmit(cmd *cobra.Command, args []string) error {
@@ -276,14 +255,14 @@ func runPlanNext(cmd *cobra.Command, args []string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp PlanNextResponse
+		var errResp api.PlanNextResponse
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
 			return fmt.Errorf("failed: %s", errResp.Error)
 		}
 		return fmt.Errorf("failed (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var nextResp PlanNextResponse
+	var nextResp api.PlanNextResponse
 	if err := json.Unmarshal(body, &nextResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}

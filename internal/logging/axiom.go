@@ -12,14 +12,15 @@ import (
 
 // Logger sends structured logs to Axiom
 type Logger struct {
-	token    string
-	dataset  string
-	client   *http.Client
-	buffer   []LogEntry
-	mu       sync.Mutex
-	agentID  string
-	command  string
-	verbose  bool
+	token     string
+	dataset   string
+	client    *http.Client
+	buffer    []LogEntry
+	mu        sync.Mutex
+	agentID   string
+	command   string
+	component string
+	verbose   bool
 }
 
 // LogEntry is a structured log entry for Axiom
@@ -50,15 +51,16 @@ func Init(agentID, command string, verbose bool) *Logger {
 		}
 
 		globalLogger = &Logger{
-			token:   token,
-			dataset: dataset,
+			token:     token,
+			dataset:   dataset,
 			client: &http.Client{
 				Timeout: 5 * time.Second,
 			},
-			buffer:  make([]LogEntry, 0, 10),
-			agentID: agentID,
-			command: command,
-			verbose: verbose,
+			buffer:    make([]LogEntry, 0, 10),
+			agentID:   agentID,
+			command:   command,
+			component: "kindship-cli",
+			verbose:   verbose,
 		}
 	})
 	return globalLogger
@@ -70,6 +72,14 @@ func Get() *Logger {
 		return &Logger{verbose: false}
 	}
 	return globalLogger
+}
+
+// SetComponent overrides the default component tag for log entries.
+// Used by the agent loop to tag logs as "agent-loop" instead of "kindship-cli".
+func (l *Logger) SetComponent(component string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.component = component
 }
 
 // IsEnabled returns true if Axiom logging is configured
@@ -85,7 +95,7 @@ func (l *Logger) log(level, message string, extra map[string]interface{}) {
 		Message:   message,
 		AgentID:   l.agentID,
 		Command:   l.command,
-		Component: "kindship-cli",
+		Component: l.component,
 		Extra:     extra,
 	}
 
