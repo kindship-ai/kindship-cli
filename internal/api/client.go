@@ -313,6 +313,63 @@ func (c *Client) FetchNextTask(agentID, serviceKey string) (*PlanNextResponse, e
 	return &nextResp, nil
 }
 
+// FetchNextTaskForProcess fetches the next runnable task scoped to a specific Process
+func (c *Client) FetchNextTaskForProcess(agentID, processEntityID, serviceKey string) (*PlanNextResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/plan/next", c.baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	q := u.Query()
+	q.Set("agent_id", agentID)
+	q.Set("mode", "process")
+	q.Set("entity_uuid", processEntityID)
+	u.RawQuery = q.Encode()
+
+	c.log("Fetching next task for Process: %s", processEntityID)
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp PlanNextResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var nextResp PlanNextResponse
+	if err := json.Unmarshal(body, &nextResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if nextResp.Task != nil {
+		c.log("Next task in Process: %s (%s)", nextResp.Task.Title, nextResp.Task.ID)
+	} else {
+		c.log("No more runnable tasks in Process")
+	}
+
+	return &nextResp, nil
+}
+
 // AbandonStaleRuns marks orphaned RUNNING runs as ABANDONED.
 // Uses X-Kindship-Service-Key header for /api/cli/* endpoints.
 func (c *Client) AbandonStaleRuns(agentID, serviceKey string) (*AbandonStaleResponse, error) {

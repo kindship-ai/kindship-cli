@@ -79,3 +79,5 @@ release:
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"
+  extra_files:
+    - glob: ./dist/kindship_linux_arm64_v*/kindship
