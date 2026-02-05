@@ -77,15 +77,16 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o kindship .
 ## Project Structure
 
 ```
-apps/kindship-cli/
+kindship-cli/
 ├── main.go                 # Entry point
 ├── cmd/
 │   ├── root.go            # Root command setup
 │   ├── auth.go            # 'kindship auth' command
+│   ├── agent.go           # 'kindship agent' command
 │   └── update.go          # 'kindship update' command
 ├── internal/
 │   ├── api/
-│   │   └── client.go      # API client for fetching secrets
+│   │   └── client.go      # API client for fetching secrets and plan data
 │   └── logging/
 │       └── axiom.go       # Axiom structured logging
 ├── go.mod
