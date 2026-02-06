@@ -127,27 +127,38 @@ The CLI can update itself without rebuilding the Docker image:
 kindship update
 ```
 
-This downloads the latest binary from `https://kindship.ai/cli/kindship` and replaces the current executable.
+This automatically detects your platform and downloads the correct binary.
 
 ### How Updates Work
 
-1. GitHub Actions builds the CLI on every push to `apps/kindship-cli/**`
-2. Binary is uploaded to GitHub releases at tag `kindship-latest`
-3. The `/cli/kindship` API route proxies downloads from the private repo
-4. `kindship update` downloads and replaces itself
+1. Release created by pushing version tag (e.g., `v0.1.3`)
+2. GoReleaser builds binaries for all 6 platforms (linux/darwin/windows × amd64/arm64)
+3. Binaries uploaded to GitHub releases
+4. `kindship update` auto-detects platform and downloads correct binary
+5. API endpoint extracts binary from archive and serves it
+
+### Supported Platforms
+
+- Linux: amd64, arm64
+- macOS (Darwin): amd64, arm64
+- Windows: amd64, arm64
 
 ### Binary Proxy Endpoint
 
-Since the repo is private, the binary is served via an API proxy:
+Multi-platform downloads via API proxy:
 
 ```
-GET https://kindship.ai/cli/kindship
+GET https://kindship.ai/cli/kindship?os={linux|darwin|windows}&arch={amd64|arm64}
 ```
 
 This endpoint:
 - Fetches the latest release from GitHub (using server-side `GITHUB_TOKEN`)
+- Extracts platform-specific binary from archive
 - Streams the binary to the client
 - Requires no authentication from the client
+- Falls back to legacy linux/arm64 binary if no platform specified
+
+For more details on creating releases, see [RELEASE.md](./RELEASE.md).
 
 ## Updating AI CLIs
 
