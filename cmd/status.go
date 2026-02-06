@@ -39,6 +39,8 @@ type StatusOutput struct {
 	Authenticated  bool   `json:"authenticated"`
 	AuthMethod     string `json:"auth_method,omitempty"`
 	UserEmail      string `json:"user_email,omitempty"`
+	UserID         string `json:"user_id,omitempty"`
+	TokenPrefix    string `json:"token_prefix,omitempty"`
 	TokenExpiry    string `json:"token_expiry,omitempty"`
 	InRepo         bool   `json:"in_repo"`
 	RepoRoot       string `json:"repo_root,omitempty"`
@@ -60,6 +62,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		output.Authenticated = true
 		output.AuthMethod = string(ctx.Method)
 		output.UserEmail = ctx.UserEmail
+		output.UserID = ctx.UserID
+		output.TokenPrefix = ctx.TokenPrefix
 		output.APIBaseURL = ctx.APIBaseURL
 		if !ctx.TokenExpiry.IsZero() {
 			output.TokenExpiry = ctx.TokenExpiry.Format("2006-01-02 15:04:05")
@@ -101,6 +105,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if output.Authenticated {
 		if output.AuthMethod == "oauth" {
 			fmt.Printf("  ✓ Logged in as %s\n", output.UserEmail)
+			if output.TokenPrefix != "" {
+				fmt.Printf("  Token: %s...\n", output.TokenPrefix)
+			}
 			if output.TokenExpiry != "" {
 				fmt.Printf("  Token expires: %s\n", output.TokenExpiry)
 			}

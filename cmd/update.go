@@ -6,12 +6,20 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/spf13/cobra"
 )
 
-// Binary download URL - proxied through kindship.ai (linux/arm64)
-const binaryURL = "https://kindship.ai/cli/kindship"
+// Binary download URL base - proxied through kindship.ai
+const binaryBaseURL = "https://kindship.ai/cli/kindship"
+
+// getBinaryURL returns the platform-specific download URL
+func getBinaryURL() string {
+	os := runtime.GOOS
+	arch := runtime.GOARCH
+	return fmt.Sprintf("%s?os=%s&arch=%s", binaryBaseURL, os, arch)
+}
 
 var updateCmd = &cobra.Command{
 	Use:   "update",
@@ -31,11 +39,15 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
+	// Get platform-specific download URL
+	downloadURL := getBinaryURL()
+
 	fmt.Printf("Downloading latest kindship...\n")
-	fmt.Printf("URL: %s\n", binaryURL)
+	fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("URL: %s\n", downloadURL)
 
 	// Download to temp file
-	resp, err := http.Get(binaryURL)
+	resp, err := http.Get(downloadURL)
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
@@ -43,6 +55,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
+	}
+
+	// Show version info from headers
+	if version := resp.Header.Get("X-Version"); version != "" {
+		fmt.Printf("Downloading version: %s\n", version)
+	}
+	if platform := resp.Header.Get("X-Platform"); platform != "" {
+		fmt.Printf("Confirmed platform: %s\n", platform)
 	}
 
 	// Create temp file

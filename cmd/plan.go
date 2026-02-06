@@ -22,9 +22,7 @@ var planCmd = &cobra.Command{
 
 Subcommands:
   submit   Submit a plan from file or stdin
-  next     Get the next executable task
-  show     Display entity details
-  list     List current planning hierarchy`,
+  next     Get the next executable task`,
 }
 
 var planSubmitCmd = &cobra.Command{
@@ -66,8 +64,7 @@ Output format:
 Examples:
   kindship plan next
   kindship plan next --format text`,
-	Aliases: []string{"run next"},
-	RunE:    runPlanNext,
+	RunE: runPlanNext,
 }
 
 var (

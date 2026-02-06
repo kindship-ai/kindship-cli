@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
@@ -28,9 +31,10 @@ var runCmd = &cobra.Command{
 	Short: "Execute a planning entity",
 	Long: `Execute a planning entity by UUID.
 
-The command fetches the entity details from the API, executes it based on its
-execution_mode (LLM_REASONING, BASH, PYTHON, etc.), and reports the results
-back to the API.
+The command fetches the entity details from the API and auto-detects the entity
+type. For PROCESS entities, it executes all child tasks in sequence. For all
+other entity types, it executes the single entity based on its execution_mode
+(LLM_REASONING, BASH, PYTHON, etc.) and reports the results back to the API.
 
 Configuration (flags take precedence over environment variables):
   --agent-id / AGENT_ID - The agent container ID
@@ -38,14 +42,11 @@ Configuration (flags take precedence over environment variables):
   --api-url / KINDSHIP_API_URL - API base URL (defaults to https://kindship.ai)
 
 Examples:
-  # Using environment variables
+  # Execute a single task
   kindship run 550e8400-e29b-41d4-a716-446655440000
 
-  # Using command line flags
-  kindship run 550e8400-e29b-41d4-a716-446655440000 \
-    --agent-id abc-123 \
-    --service-key sk_xxx \
-    --api-url https://kindship.ai`,
+  # Execute all tasks in a Process
+  kindship run 660e8400-e29b-41d4-a716-446655440000`,
 	Args: cobra.ExactArgs(1),
 	RunE: runExecute,
 }
@@ -84,6 +85,26 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	// Create API client
 	client := api.NewClient(apiURL, verbose)
 
+	// Fetch entity to detect type before execution
+	log.Info("Fetching entity to detect type", map[string]interface{}{
+		"entity_id": entityID,
+	})
+	entityResp, err := client.FetchEntityForExecution(entityID, serviceKey)
+	if err != nil {
+		log.Error("Failed to fetch entity", err)
+		return fmt.Errorf("failed to fetch entity: %w", err)
+	}
+
+	// If this is a PROCESS entity, run the process execution loop
+	if entityResp.Entity.Type == "PROCESS" {
+		log.Info("Entity is a PROCESS, executing all child tasks", map[string]interface{}{
+			"entity_id":    entityID,
+			"entity_title": entityResp.Entity.Title,
+		})
+		return runProcessExecution(entityID, client, log)
+	}
+
+	// Otherwise, execute a single entity
 	success, err := executeEntity(EntityExecutionParams{
 		EntityID:   entityID,
 		AgentID:    agentID,
@@ -368,6 +389,147 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	})
 
 	return result.Success, nil
+}
+
+// runProcessExecution executes all tasks within a Process entity by polling
+// for runnable tasks scoped to that Process. Extracted from the former
+// "agent run" command.
+func runProcessExecution(processEntityID string, client *api.Client, log *logging.Logger) error {
+	// Set up graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigCh
+		log.Info("Received signal, shutting down", map[string]interface{}{
+			"signal": sig.String(),
+		})
+		cancel()
+	}()
+
+	// Create Run for the Process entity
+	startReq := api.ExecutionStartRequest{
+		EntityID:      processEntityID,
+		ExecutionMode: "PROCESS",
+		AgentID:       agentID,
+	}
+
+	startResp, err := client.StartExecution(startReq, serviceKey)
+	if err != nil {
+		return fmt.Errorf("failed to start Process run: %w", err)
+	}
+
+	processRunID := startResp.ExecutionID
+	log.Info("Created Process run", map[string]interface{}{
+		"run_id": processRunID,
+	})
+
+	// Process execution loop
+	tasksExecuted := 0
+	var lastError error
+	interrupted := false
+
+	for {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			log.Info("Process execution interrupted by signal", map[string]interface{}{
+				"tasks_executed": tasksExecuted,
+			})
+			interrupted = true
+			lastError = ctx.Err()
+			goto complete
+		default:
+		}
+
+		// Fetch next task scoped to this Process
+		nextResp, err := client.FetchNextTaskForProcess(agentID, processEntityID, serviceKey)
+		if err != nil {
+			log.Error("Failed to fetch next task", err, nil)
+			lastError = err
+			break
+		}
+
+		// No more tasks — Process complete
+		if nextResp.Task == nil {
+			log.Info("No more tasks in Process", map[string]interface{}{
+				"tasks_executed": tasksExecuted,
+			})
+			break
+		}
+
+		// Execute task
+		log.Info("Executing task", map[string]interface{}{
+			"task_id":    nextResp.Task.ID,
+			"task_title": nextResp.Task.Title,
+		})
+
+		success, err := executeEntity(EntityExecutionParams{
+			EntityID:   nextResp.Task.ID,
+			AgentID:    agentID,
+			ServiceKey: serviceKey,
+			Client:     client,
+			Log:        log,
+		})
+
+		if err != nil && !errors.Is(err, ErrAskUserSkipped) {
+			log.Error("Task execution failed", err, map[string]interface{}{
+				"task_id": nextResp.Task.ID,
+			})
+			lastError = err
+			// Continue to next task (non-fatal)
+		} else if success {
+			tasksExecuted++
+		}
+	}
+
+complete:
+
+	// Complete Process run
+	completeReq := api.ExecutionCompleteRequest{
+		Status: api.ExecutionAttemptStatusSuccess,
+		Outputs: &api.ExecutionOutputs{
+			Metrics: map[string]interface{}{
+				"tasks_executed": tasksExecuted,
+				"interrupted":    interrupted,
+			},
+		},
+	}
+
+	if interrupted {
+		completeReq.Status = api.ExecutionAttemptStatusAbandoned
+		errorMsg := "Process execution interrupted by signal"
+		completeReq.FailureReason = &errorMsg
+	} else if lastError != nil {
+		completeReq.Status = api.ExecutionAttemptStatusFailed
+		errorMsg := lastError.Error()
+		completeReq.FailureReason = &errorMsg
+	}
+
+	_, err = client.CompleteExecution(processRunID, completeReq, serviceKey)
+	if err != nil {
+		log.Error("Failed to complete Process run", err, nil)
+		return err
+	}
+
+	log.Info("Process execution completed", map[string]interface{}{
+		"run_id":         processRunID,
+		"status":         completeReq.Status,
+		"tasks_executed": tasksExecuted,
+		"interrupted":    interrupted,
+	})
+
+	if interrupted {
+		return fmt.Errorf("Process execution interrupted")
+	}
+
+	if lastError != nil {
+		return fmt.Errorf("Process completed with errors: %w", lastError)
+	}
+
+	return nil
 }
 
 func init() {

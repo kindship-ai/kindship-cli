@@ -13,12 +13,14 @@ including authentication, planning, and execution management.
 For local development:
   kindship login       Authenticate with your Kindship account
   kindship setup       Link a repository to an agent
-  kindship plan        Submit and manage plans
-  kindship run next    Get and execute the next work item
+  kindship status      Show current configuration
+  kindship plan next   Get the next executable task
+  kindship plan submit Submit a plan
 
 For agent containers:
   kindship auth        Inject secrets into subprocess environment
-  kindship run <id>    Execute a specific planning entity`,
+  kindship run <id>    Execute a planning entity (auto-detects type)
+  kindship agent loop  Run autonomous execution loop`,
 }
 
 func Execute() error {

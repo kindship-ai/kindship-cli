@@ -158,8 +158,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("\nSetup complete! You can now use:")
-	fmt.Println("  kindship status    Show current configuration")
-	fmt.Println("  kindship run next  Get the next work item")
+	fmt.Println("  kindship status      Show current configuration")
+	fmt.Println("  kindship plan next   Get the next work item")
 
 	return nil
 }
@@ -276,13 +276,10 @@ version: 1
 commands:
   - name: next
     description: Get next work item from planning
-    command: kindship run next --format json
-  - name: complete
-    description: Mark current task complete
-    command: kindship run complete {{entity_id}} --outputs "{{outputs}}"
+    command: kindship plan next --json
   - name: status
     description: Show current repo and agent status
-    command: kindship status --format json
+    command: kindship status --json
 `
 	if err := os.WriteFile(skillsDir+"/kindship.yaml", []byte(kindshipSkill), 0644); err != nil {
 		return fmt.Errorf("failed to write kindship skill: %w", err)
