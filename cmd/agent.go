@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -13,6 +14,9 @@ import (
 	"github.com/kindship-ai/kindship-cli/internal/logging"
 	"github.com/spf13/cobra"
 )
+
+// activeResumes tracks active resume goroutines by run ID to prevent duplicates.
+var activeResumes sync.Map
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
@@ -29,7 +33,7 @@ var loopCmd = &cobra.Command{
 	Long: `Continuously polls for runnable tasks and executes them.
 
 Runs inside agent containers. Automatically:
-- Abandons stale RUNNING runs on startup
+- Recovers RUNNING runs on startup (resumes ORCHESTRATE, fails leaf runs)
 - Polls for next task at configurable interval
 - Dispatches execution by mode (LLM, Bash, Python, etc.)
 - Sleeps when no tasks are available
@@ -102,16 +106,40 @@ func runLoop(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Step 1: Abandon stale runs on startup
-	log.Info("Abandoning stale runs from previous loop instance")
-	abandonResp, err := client.AbandonStaleRuns(agentID, serviceKey)
+	// Step 1: Recover runs from previous loop instance
+	log.Info("Recovering runs from previous loop instance")
+	recoverResp, err := client.RecoverRuns(agentID, serviceKey)
 	if err != nil {
-		log.Error("Failed to abandon stale runs", err)
+		log.Error("Failed to recover runs", err)
 		// Non-fatal — continue loop startup
-	} else if abandonResp.AbandonedCount > 0 {
-		log.Info("Abandoned stale runs", map[string]interface{}{
-			"abandoned_count": abandonResp.AbandonedCount,
+	} else {
+		log.Info("Run recovery complete", map[string]interface{}{
+			"resumed_count":    len(recoverResp.ResumedRuns),
+			"failed_count":     recoverResp.FailedCount,
+			"skipped_ask_user": recoverResp.SkippedAskUser,
 		})
+
+		// Resume ORCHESTRATE runs in background goroutines
+		for _, resumed := range recoverResp.ResumedRuns {
+			if resumed.ExecutionMode == string(api.ExecutionModeOrchestrate) {
+				runID := resumed.RunID
+				if _, loaded := activeResumes.LoadOrStore(runID, true); loaded {
+					log.Info("Resume already active, skipping", map[string]interface{}{
+						"run_id": runID,
+					})
+					continue
+				}
+				go func(entityID, runID string) {
+					defer activeResumes.Delete(runID)
+					if resumeErr := resumeOrchestration(entityID, runID, client, log); resumeErr != nil {
+						log.Error("Failed to resume ORCHESTRATE run", resumeErr, map[string]interface{}{
+							"entity_id": entityID,
+							"run_id":    runID,
+						})
+					}
+				}(resumed.EntityID, runID)
+			}
+		}
 	}
 
 	log.Info("Loop started", map[string]interface{}{

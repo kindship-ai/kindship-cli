@@ -23,9 +23,8 @@ type ExecutionResult struct {
 func ExecuteLLM(entity *api.PlanningEntity, inputs map[string]interface{}) *ExecutionResult {
 	prompt := buildPrompt(entity, inputs)
 
-	// Execute Claude Code with the prompt
-	// Use -p flag for headless prompt mode (not --prompt which doesn't exist)
-	cmd := exec.Command("claude", "-p", prompt)
+	// Execute Claude Code via kindship auth which injects credentials from the API
+	cmd := exec.Command("kindship", "auth", "claude", "-p", prompt)
 	cmd.Dir = "/workspace"
 
 	var stdout, stderr bytes.Buffer
@@ -99,6 +98,14 @@ func buildPrompt(entity *api.PlanningEntity, inputs map[string]interface{}) stri
 			prompt.WriteString(fmt.Sprintf("- %s\n", outcome))
 		}
 		prompt.WriteString("\n")
+	}
+
+	// Include reference code for HYBRID mode
+	if entity.ExecutionMode == api.ExecutionModeHybrid && entity.Code != nil && *entity.Code != "" {
+		prompt.WriteString("## Reference Code\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(*entity.Code)
+		prompt.WriteString("\n```\n\n")
 	}
 
 	// Add output schema if provided

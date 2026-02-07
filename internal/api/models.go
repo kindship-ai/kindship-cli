@@ -12,6 +12,7 @@ const (
 	ExecutionModeBash          ExecutionMode = "BASH"
 	ExecutionModePython        ExecutionMode = "PYTHON"
 	ExecutionModeAskUser       ExecutionMode = "ASK_USER"
+	ExecutionModeOrchestrate   ExecutionMode = "ORCHESTRATE"
 )
 
 // ExecutionAttemptStatus represents the status of an execution attempt
@@ -96,9 +97,10 @@ type EntityExecuteResponse struct {
 
 // ExecutionStartRequest represents a request to start a run
 type ExecutionStartRequest struct {
-	EntityID      string        `json:"entity_id"`
-	ExecutionMode ExecutionMode `json:"execution_mode"`
-	AgentID       string        `json:"agent_id"`
+	EntityID            string        `json:"entity_id"`
+	ExecutionMode       ExecutionMode `json:"execution_mode"`
+	AgentID             string        `json:"agent_id"`
+	OrchestrationMethod string        `json:"orchestration_method,omitempty"`
 }
 
 // ExecutionStartResponse represents the response from starting an execution
@@ -171,4 +173,27 @@ type TaskInfo struct {
 type AbandonStaleResponse struct {
 	AbandonedCount int    `json:"abandoned_count"`
 	Error          string `json:"error,omitempty"`
+}
+
+// ActivateEntityResponse is the response from the entity activate endpoint
+type ActivateEntityResponse struct {
+	ActivatedCount int      `json:"activated_count"`
+	ActivatedIDs   []string `json:"activated_ids"`
+	Error          string   `json:"error,omitempty"`
+}
+
+// ResumedRun represents a run that should be resumed after container restart
+type ResumedRun struct {
+	RunID         string `json:"run_id"`
+	EntityID      string `json:"entity_id"`
+	ExecutionMode string `json:"execution_mode"`
+	EntityType    string `json:"entity_type"`
+}
+
+// RecoverRunsResponse is the response from the recover-runs endpoint
+type RecoverRunsResponse struct {
+	ResumedRuns    []ResumedRun `json:"resumed_runs"`
+	FailedCount    int          `json:"failed_count"`
+	SkippedAskUser int          `json:"skipped_ask_user"`
+	Error          string       `json:"error,omitempty"`
 }

@@ -313,8 +313,9 @@ func (c *Client) FetchNextTask(agentID, serviceKey string) (*PlanNextResponse, e
 	return &nextResp, nil
 }
 
-// FetchNextTaskForProcess fetches the next runnable task scoped to a specific Process
-func (c *Client) FetchNextTaskForProcess(agentID, processEntityID, serviceKey string) (*PlanNextResponse, error) {
+// FetchNextTaskScoped fetches the next runnable task scoped to any parent entity.
+// Uses mode=orchestrate&entity_uuid=<parentEntityID>.
+func (c *Client) FetchNextTaskScoped(agentID, parentEntityID, serviceKey string) (*PlanNextResponse, error) {
 	u, err := url.Parse(fmt.Sprintf("%s/api/cli/plan/next", c.baseURL))
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %w", err)
@@ -322,11 +323,11 @@ func (c *Client) FetchNextTaskForProcess(agentID, processEntityID, serviceKey st
 
 	q := u.Query()
 	q.Set("agent_id", agentID)
-	q.Set("mode", "process")
-	q.Set("entity_uuid", processEntityID)
+	q.Set("mode", "orchestrate")
+	q.Set("entity_uuid", parentEntityID)
 	u.RawQuery = q.Encode()
 
-	c.log("Fetching next task for Process: %s", processEntityID)
+	c.log("Fetching next task scoped to entity: %s", parentEntityID)
 
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -362,12 +363,71 @@ func (c *Client) FetchNextTaskForProcess(agentID, processEntityID, serviceKey st
 	}
 
 	if nextResp.Task != nil {
-		c.log("Next task in Process: %s (%s)", nextResp.Task.Title, nextResp.Task.ID)
+		c.log("Next task scoped to entity: %s (%s)", nextResp.Task.Title, nextResp.Task.ID)
 	} else {
-		c.log("No more runnable tasks in Process")
+		c.log("No more runnable tasks scoped to entity")
 	}
 
 	return &nextResp, nil
+}
+
+// FetchNextTaskForProcess fetches the next runnable task scoped to a specific Process.
+// Deprecated: Use FetchNextTaskScoped instead. This is a backward-compatible wrapper.
+func (c *Client) FetchNextTaskForProcess(agentID, processEntityID, serviceKey string) (*PlanNextResponse, error) {
+	return c.FetchNextTaskScoped(agentID, processEntityID, serviceKey)
+}
+
+// ActivateEntity activates a planning entity, optionally including all descendants.
+// Uses X-Kindship-Service-Key header for /api/cli/* endpoints.
+func (c *Client) ActivateEntity(entityID, serviceKey string, recursive bool) (*ActivateEntityResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/entity/%s/activate", c.baseURL, entityID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	q := u.Query()
+	if recursive {
+		q.Set("recursive", "true")
+	}
+	u.RawQuery = q.Encode()
+
+	c.log("Activating entity: %s (recursive=%v)", entityID, recursive)
+
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ActivateEntityResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var activateResp ActivateEntityResponse
+	if err := json.Unmarshal(body, &activateResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Activated %d entities", activateResp.ActivatedCount)
+	return &activateResp, nil
 }
 
 // AbandonStaleRuns marks orphaned RUNNING runs as ABANDONED.
@@ -421,4 +481,59 @@ func (c *Client) AbandonStaleRuns(agentID, serviceKey string) (*AbandonStaleResp
 
 	c.log("Abandoned %d stale runs", abandonResp.AbandonedCount)
 	return &abandonResp, nil
+}
+
+// RecoverRuns classifies and recovers RUNNING runs after container restart.
+// ORCHESTRATE runs are returned for resumption, leaf runs are marked FAILED,
+// ASK_USER runs are skipped.
+func (c *Client) RecoverRuns(agentID, serviceKey string) (*RecoverRunsResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/agent/recover-runs", c.baseURL)
+	c.log("Recovering runs for agent: %s", agentID)
+
+	reqBody := struct {
+		AgentID string `json:"agent_id"`
+	}{AgentID: agentID}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp RecoverRunsResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var recoverResp RecoverRunsResponse
+	if err := json.Unmarshal(body, &recoverResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Recovered runs: %d resumed, %d failed, %d skipped (ASK_USER)",
+		len(recoverResp.ResumedRuns), recoverResp.FailedCount, recoverResp.SkippedAskUser)
+	return &recoverResp, nil
 }

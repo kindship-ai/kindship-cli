@@ -95,13 +95,14 @@ func runExecute(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to fetch entity: %w", err)
 	}
 
-	// If this is a PROCESS entity, run the process execution loop
-	if entityResp.Entity.Type == "PROCESS" {
-		log.Info("Entity is a PROCESS, executing all child tasks", map[string]interface{}{
+	// If this entity uses ORCHESTRATE mode, run the orchestration loop
+	if entityResp.Entity.ExecutionMode == api.ExecutionModeOrchestrate {
+		log.Info("Entity uses ORCHESTRATE mode, executing all child tasks", map[string]interface{}{
 			"entity_id":    entityID,
 			"entity_title": entityResp.Entity.Title,
+			"entity_type":  entityResp.Entity.Type,
 		})
-		return runProcessExecution(entityID, client, log)
+		return runOrchestration(entityID, client, log)
 	}
 
 	// Otherwise, execute a single entity
@@ -189,6 +190,29 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 			return false, fmt.Errorf("input validation failed: %w", err)
 		}
 		log.Info("Input validation passed")
+	}
+
+	// ORCHESTRATE: handled separately — creates its own run and orchestration loop
+	if entityResp.Entity.ExecutionMode == api.ExecutionModeOrchestrate {
+		startReq := api.ExecutionStartRequest{
+			EntityID:      params.EntityID,
+			ExecutionMode: api.ExecutionModeOrchestrate,
+			AgentID:       params.AgentID,
+		}
+		orchStartResp, orchErr := params.Client.StartExecution(startReq, params.ServiceKey)
+		if orchErr != nil {
+			log.Error("Failed to start ORCHESTRATE run", orchErr)
+			return false, fmt.Errorf("failed to start ORCHESTRATE run: %w", orchErr)
+		}
+		log.Info("Created ORCHESTRATE run", map[string]interface{}{
+			"run_id":    orchStartResp.ExecutionID,
+			"entity_id": params.EntityID,
+		})
+		orchLoopErr := orchestrateChildren(params.EntityID, orchStartResp.ExecutionID, params.Client, params.Log)
+		if orchLoopErr != nil {
+			return false, orchLoopErr
+		}
+		return true, nil
 	}
 
 	// Step 3: Create run
@@ -391,10 +415,46 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	return result.Success, nil
 }
 
-// runProcessExecution executes all tasks within a Process entity by polling
-// for runnable tasks scoped to that Process. Extracted from the former
-// "agent run" command.
-func runProcessExecution(processEntityID string, client *api.Client, log *logging.Logger) error {
+// runOrchestration creates a new ORCHESTRATE run for any entity with
+// execution_mode=ORCHESTRATE and orchestrates its child tasks.
+func runOrchestration(entityID string, client *api.Client, log *logging.Logger) error {
+	// Create Run for the entity
+	startReq := api.ExecutionStartRequest{
+		EntityID:      entityID,
+		ExecutionMode: api.ExecutionModeOrchestrate,
+		AgentID:       agentID,
+	}
+
+	startResp, err := client.StartExecution(startReq, serviceKey)
+	if err != nil {
+		return fmt.Errorf("failed to start ORCHESTRATE run: %w", err)
+	}
+
+	runID := startResp.ExecutionID
+	log.Info("Created ORCHESTRATE run", map[string]interface{}{
+		"run_id":    runID,
+		"entity_id": entityID,
+	})
+
+	return orchestrateChildren(entityID, runID, client, log)
+}
+
+// resumeOrchestration resumes an existing ORCHESTRATE run after container
+// restart, re-entering the child orchestration polling loop.
+// Works for any entity type (PROCESS, PROJECT, TASK-with-children).
+func resumeOrchestration(entityID, runID string, client *api.Client, log *logging.Logger) error {
+	log.Info("Resuming ORCHESTRATE run", map[string]interface{}{
+		"entity_id": entityID,
+		"run_id":    runID,
+	})
+
+	return orchestrateChildren(entityID, runID, client, log)
+}
+
+// orchestrateChildren is the shared polling loop for ORCHESTRATE runs.
+// It polls for runnable child tasks, executes them, and completes the
+// parent run when all children are done.
+func orchestrateChildren(entityID, runID string, client *api.Client, log *logging.Logger) error {
 	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -403,39 +463,24 @@ func runProcessExecution(processEntityID string, client *api.Client, log *loggin
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		log.Info("Received signal, shutting down", map[string]interface{}{
+		log.Info("Received signal, shutting down orchestration", map[string]interface{}{
 			"signal": sig.String(),
 		})
 		cancel()
 	}()
 
-	// Create Run for the Process entity
-	startReq := api.ExecutionStartRequest{
-		EntityID:      processEntityID,
-		ExecutionMode: "PROCESS",
-		AgentID:       agentID,
-	}
-
-	startResp, err := client.StartExecution(startReq, serviceKey)
-	if err != nil {
-		return fmt.Errorf("failed to start Process run: %w", err)
-	}
-
-	processRunID := startResp.ExecutionID
-	log.Info("Created Process run", map[string]interface{}{
-		"run_id": processRunID,
-	})
-
-	// Process execution loop
 	tasksExecuted := 0
 	var lastError error
 	interrupted := false
+	const initialBackoff = 1 * time.Second
+	const maxBackoff = 30 * time.Second
+	backoff := initialBackoff
 
 	for {
 		// Check context cancellation
 		select {
 		case <-ctx.Done():
-			log.Info("Process execution interrupted by signal", map[string]interface{}{
+			log.Info("Orchestration interrupted by signal", map[string]interface{}{
 				"tasks_executed": tasksExecuted,
 			})
 			interrupted = true
@@ -444,21 +489,45 @@ func runProcessExecution(processEntityID string, client *api.Client, log *loggin
 		default:
 		}
 
-		// Fetch next task scoped to this Process
-		nextResp, err := client.FetchNextTaskForProcess(agentID, processEntityID, serviceKey)
+		// Fetch next task scoped to this entity
+		nextResp, err := client.FetchNextTaskScoped(agentID, entityID, serviceKey)
 		if err != nil {
 			log.Error("Failed to fetch next task", err, nil)
 			lastError = err
 			break
 		}
 
-		// No more tasks — Process complete
+		// No task available right now
 		if nextResp.Task == nil {
-			log.Info("No more tasks in Process", map[string]interface{}{
+			if nextResp.PendingCount > 0 {
+				// Tasks are pending (blocked deps, ASK_USER waiting, etc.) — backoff and retry
+				log.Info("No runnable tasks but children pending, waiting", map[string]interface{}{
+					"pending_count":  nextResp.PendingCount,
+					"tasks_executed": tasksExecuted,
+					"backoff_s":      int(backoff.Seconds()),
+				})
+				select {
+				case <-ctx.Done():
+					interrupted = true
+					lastError = ctx.Err()
+					goto complete
+				case <-time.After(backoff):
+				}
+				// Exponential backoff: 1s -> 2s -> 4s -> 8s -> 16s -> 30s (cap)
+				backoff = backoff * 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+			// pending_count == 0 — all children done
+			log.Info("All children completed", map[string]interface{}{
 				"tasks_executed": tasksExecuted,
 			})
 			break
 		}
+		// Reset backoff on successful task fetch
+		backoff = initialBackoff
 
 		// Execute task
 		log.Info("Executing task", map[string]interface{}{
@@ -474,20 +543,38 @@ func runProcessExecution(processEntityID string, client *api.Client, log *loggin
 			Log:        log,
 		})
 
-		if err != nil && !errors.Is(err, ErrAskUserSkipped) {
-			log.Error("Task execution failed", err, map[string]interface{}{
+		if err != nil {
+			if errors.Is(err, ErrAskUserSkipped) {
+				// ASK_USER started — pending_count will keep loop alive
+				log.Info("ASK_USER task started within orchestration", map[string]interface{}{
+					"task_id": nextResp.Task.ID,
+				})
+				continue
+			}
+			// Fail-fast: child failure stops orchestration
+			log.Error("Child task failed, stopping orchestration (fail-fast)", err, map[string]interface{}{
 				"task_id": nextResp.Task.ID,
 			})
 			lastError = err
-			// Continue to next task (non-fatal)
-		} else if success {
-			tasksExecuted++
+			break
 		}
+
+		if !success {
+			// Child execution returned failure (non-zero exit)
+			failMsg := fmt.Sprintf("child task %s failed", nextResp.Task.ID)
+			log.Error("Child task execution failed, stopping orchestration (fail-fast)", nil, map[string]interface{}{
+				"task_id": nextResp.Task.ID,
+			})
+			lastError = fmt.Errorf(failMsg)
+			break
+		}
+
+		tasksExecuted++
 	}
 
 complete:
 
-	// Complete Process run
+	// Complete the orchestration run
 	completeReq := api.ExecutionCompleteRequest{
 		Status: api.ExecutionAttemptStatusSuccess,
 		Outputs: &api.ExecutionOutputs{
@@ -500,7 +587,7 @@ complete:
 
 	if interrupted {
 		completeReq.Status = api.ExecutionAttemptStatusAbandoned
-		errorMsg := "Process execution interrupted by signal"
+		errorMsg := "Orchestration interrupted by signal"
 		completeReq.FailureReason = &errorMsg
 	} else if lastError != nil {
 		completeReq.Status = api.ExecutionAttemptStatusFailed
@@ -508,25 +595,25 @@ complete:
 		completeReq.FailureReason = &errorMsg
 	}
 
-	_, err = client.CompleteExecution(processRunID, completeReq, serviceKey)
+	_, err := client.CompleteExecution(runID, completeReq, serviceKey)
 	if err != nil {
-		log.Error("Failed to complete Process run", err, nil)
+		log.Error("Failed to complete orchestration run", err, nil)
 		return err
 	}
 
-	log.Info("Process execution completed", map[string]interface{}{
-		"run_id":         processRunID,
+	log.Info("Orchestration completed", map[string]interface{}{
+		"run_id":         runID,
 		"status":         completeReq.Status,
 		"tasks_executed": tasksExecuted,
 		"interrupted":    interrupted,
 	})
 
 	if interrupted {
-		return fmt.Errorf("Process execution interrupted")
+		return fmt.Errorf("orchestration interrupted")
 	}
 
 	if lastError != nil {
-		return fmt.Errorf("Process completed with errors: %w", lastError)
+		return fmt.Errorf("orchestration completed with errors: %w", lastError)
 	}
 
 	return nil
