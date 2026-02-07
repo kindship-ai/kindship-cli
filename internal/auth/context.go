@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -119,6 +120,17 @@ func (c *Context) IsLocalMode() bool {
 // GetAuthHeader returns the appropriate Authorization header value
 func (c *Context) GetAuthHeader() string {
 	return fmt.Sprintf("Bearer %s", c.Token)
+}
+
+// SetAuthHeaders sets the appropriate authentication headers on the request.
+// Container mode → X-Kindship-Service-Key header
+// OAuth mode    → Authorization: Bearer <token> header
+func (c *Context) SetAuthHeaders(req *http.Request) {
+	if c.IsContainerMode() {
+		req.Header.Set("X-Kindship-Service-Key", c.Token)
+	} else {
+		req.Header.Set("Authorization", c.GetAuthHeader())
+	}
 }
 
 // RequireAgentID returns the agent ID or an error if not set

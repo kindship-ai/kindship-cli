@@ -82,17 +82,26 @@ func init() {
 
 // PlanSubmitRequest is the request body for plan submission
 type PlanSubmitRequest struct {
-	AgentID     string     `json:"agent_id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Tasks       []TaskSpec `json:"tasks"`
+	AgentID       string     `json:"agent_id"`
+	Title         string     `json:"title"`
+	Description   string     `json:"description"`
+	Tasks         []TaskSpec `json:"tasks"`
+	Type          string     `json:"type,omitempty"`
+	SkipBootstrap bool       `json:"skip_bootstrap,omitempty"`
 }
 
 // TaskSpec represents a task in the plan
 type TaskSpec struct {
-	Title         string `json:"title"`
-	Description   string `json:"description,omitempty"`
-	SequenceOrder int    `json:"sequence_order,omitempty"`
+	Title               string                 `json:"title"`
+	Description         string                 `json:"description,omitempty"`
+	SequenceOrder       int                    `json:"sequence_order,omitempty"`
+	ExecutionMode       string                 `json:"execution_mode,omitempty"`
+	Code                string                 `json:"code,omitempty"`
+	DependenciesLabeled map[string]string      `json:"dependencies_labeled,omitempty"`
+	InputSchema         map[string]interface{} `json:"input_schema,omitempty"`
+	OutputSchema        map[string]interface{} `json:"output_schema,omitempty"`
+	SuccessCriteria     *api.SuccessCriteria   `json:"success_criteria,omitempty"`
+	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
 }
 
 // PlanSubmitResponse is the response from plan submission
@@ -144,9 +153,11 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 
 	// Parse the plan
 	var plan struct {
-		Title       string     `json:"title"`
-		Description string     `json:"description"`
-		Tasks       []TaskSpec `json:"tasks"`
+		Title         string     `json:"title"`
+		Description   string     `json:"description"`
+		Tasks         []TaskSpec `json:"tasks"`
+		Type          string     `json:"type,omitempty"`
+		SkipBootstrap bool       `json:"skip_bootstrap,omitempty"`
 	}
 
 	if err := json.Unmarshal(planData, &plan); err != nil {
@@ -155,10 +166,12 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 
 	// Build request
 	reqBody := PlanSubmitRequest{
-		AgentID:     agentID,
-		Title:       plan.Title,
-		Description: plan.Description,
-		Tasks:       plan.Tasks,
+		AgentID:       agentID,
+		Title:         plan.Title,
+		Description:   plan.Description,
+		Tasks:         plan.Tasks,
+		Type:          plan.Type,
+		SkipBootstrap: plan.SkipBootstrap,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -174,7 +187,7 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", ctx.GetAuthHeader())
+	ctx.SetAuthHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Kindship-CLI-Version", Version)
 
@@ -236,7 +249,7 @@ func runPlanNext(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", ctx.GetAuthHeader())
+	ctx.SetAuthHeaders(req)
 	req.Header.Set("X-Kindship-CLI-Version", Version)
 
 	client := &http.Client{Timeout: 30 * time.Second}
