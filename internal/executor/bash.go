@@ -72,10 +72,21 @@ func ExecuteBashWithContext(ctx context.Context, entity *api.PlanningEntity, inp
 	}
 }
 
+// inputDir is where input JSON files are written for safe BASH consumption.
+// BASH's echo interprets \n escape sequences, corrupting JSON. File-based
+// access via INPUT_<LABEL>_FILE avoids this.
+const inputDir = "/tmp/.kindship-inputs"
+
 // buildEnvWithInputs creates an environment variable slice with the current
-// env plus INPUT_<LABEL>=<json_value> for each labeled input.
+// env plus INPUT_<LABEL>=<json_value> and INPUT_<LABEL>_FILE=<path> for each
+// labeled input. The _FILE variant provides safe access for BASH scripts that
+// would otherwise corrupt JSON via echo's escape sequence interpretation.
 func buildEnvWithInputs(inputs map[string]interface{}) []string {
 	env := os.Environ()
+
+	if len(inputs) > 0 {
+		_ = os.MkdirAll(inputDir, 0755)
+	}
 
 	for label, value := range inputs {
 		envKey := "INPUT_" + strings.ToUpper(strings.ReplaceAll(label, "-", "_"))
@@ -84,6 +95,12 @@ func buildEnvWithInputs(inputs map[string]interface{}) []string {
 			continue
 		}
 		env = append(env, fmt.Sprintf("%s=%s", envKey, string(jsonBytes)))
+
+		// Write to file for safe BASH access (avoids echo \n interpretation)
+		filePath := fmt.Sprintf("%s/%s.json", inputDir, label)
+		if writeErr := os.WriteFile(filePath, jsonBytes, 0644); writeErr == nil {
+			env = append(env, fmt.Sprintf("%s_FILE=%s", envKey, filePath))
+		}
 	}
 
 	return env
