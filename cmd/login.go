@@ -189,14 +189,22 @@ func computeCodeChallenge(verifier string) string {
 
 // findAvailablePort finds an available port and returns a listener
 func findAvailablePort() (net.Listener, int, error) {
-	// Try to find an available port starting from 54321
-	for port := 54321; port < 54421; port++ {
-		listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
-		if err == nil {
-			return listener, port, nil
-		}
+	// Bind to an ephemeral port assigned by the OS.
+	//
+	// We explicitly bind to 127.0.0.1 to avoid "localhost" IPv4/IPv6 ambiguity and
+	// to avoid collisions with common local dev gateways (ex: Supabase uses 54321).
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to bind local callback listener: %w", err)
 	}
-	return nil, 0, fmt.Errorf("no available ports found")
+
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		listener.Close()
+		return nil, 0, fmt.Errorf("unexpected listener address type %T", listener.Addr())
+	}
+
+	return listener, addr.Port, nil
 }
 
 type callbackResult struct {
