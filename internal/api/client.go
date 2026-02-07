@@ -430,59 +430,6 @@ func (c *Client) ActivateEntity(entityID, serviceKey string, recursive bool) (*A
 	return &activateResp, nil
 }
 
-// AbandonStaleRuns marks orphaned RUNNING runs as ABANDONED.
-// Uses X-Kindship-Service-Key header for /api/cli/* endpoints.
-func (c *Client) AbandonStaleRuns(agentID, serviceKey string) (*AbandonStaleResponse, error) {
-	endpoint := fmt.Sprintf("%s/api/cli/agent/abandon-stale", c.baseURL)
-	c.log("Abandoning stale runs for agent: %s", agentID)
-
-	reqBody := struct {
-		AgentID string `json:"agent_id"`
-	}{AgentID: agentID}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("X-Kindship-Service-Key", serviceKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "kindship-cli/1.0")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp AbandonStaleResponse
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
-		}
-		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
-	}
-
-	var abandonResp AbandonStaleResponse
-	if err := json.Unmarshal(body, &abandonResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	c.log("Abandoned %d stale runs", abandonResp.AbandonedCount)
-	return &abandonResp, nil
-}
-
 // RecoverRuns classifies and recovers RUNNING runs after container restart.
 // ORCHESTRATE runs are returned for resumption, leaf runs are marked FAILED,
 // ASK_USER runs are skipped.

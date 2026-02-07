@@ -153,8 +153,8 @@ type PlanNextResponse struct {
 }
 
 // TaskInfo represents a task from the plan/next API
-type TaskInfo struct {
-	ID                  string                 `json:"id"`
+	type TaskInfo struct {
+		ID                  string                 `json:"id"`
 	Title               string                 `json:"title"`
 	Description         string                 `json:"description"`
 	Rationale           string                 `json:"rationale,omitempty"`
@@ -166,19 +166,13 @@ type TaskInfo struct {
 	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
 	Dependencies        []string               `json:"dependencies"`
 	DependenciesLabeled map[string]string      `json:"dependencies_labeled"`
-	SequenceOrder       int                    `json:"sequence_order"`
-}
+		SequenceOrder       int                    `json:"sequence_order"`
+	}
 
-// AbandonStaleResponse is the response from the abandon-stale endpoint
-type AbandonStaleResponse struct {
-	AbandonedCount int    `json:"abandoned_count"`
-	Error          string `json:"error,omitempty"`
-}
-
-// ActivateEntityResponse is the response from the entity activate endpoint
-type ActivateEntityResponse struct {
-	ActivatedCount int      `json:"activated_count"`
-	ActivatedIDs   []string `json:"activated_ids"`
+	// ActivateEntityResponse is the response from the entity activate endpoint
+	type ActivateEntityResponse struct {
+		ActivatedCount int      `json:"activated_count"`
+		ActivatedIDs   []string `json:"activated_ids"`
 	Error          string   `json:"error,omitempty"`
 }
 
