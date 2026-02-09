@@ -31,11 +31,11 @@ const (
 type ValidationOutcome string
 
 const (
-	ValidationOutcomePass            ValidationOutcome = "PASS"
-	ValidationOutcomeFail            ValidationOutcome = "FAIL"
-	ValidationOutcomeWarn            ValidationOutcome = "WARN"
-	ValidationOutcomeCounterfactual  ValidationOutcome = "COUNTERFACTUAL"
-	ValidationOutcomePartial         ValidationOutcome = "PARTIAL"
+	ValidationOutcomePass           ValidationOutcome = "PASS"
+	ValidationOutcomeFail           ValidationOutcome = "FAIL"
+	ValidationOutcomeWarn           ValidationOutcome = "WARN"
+	ValidationOutcomeCounterfactual ValidationOutcome = "COUNTERFACTUAL"
+	ValidationOutcomePartial        ValidationOutcome = "PARTIAL"
 )
 
 // ValidationSeverity represents the severity of a validation result
@@ -56,26 +56,26 @@ type SuccessCriteria struct {
 
 // PlanningEntity represents a planning entity from the API
 type PlanningEntity struct {
-	ID                   string                 `json:"id"`
-	Type                 string                 `json:"type"`
-	Title                string                 `json:"title"`
-	Description          string                 `json:"description"`
-	ExecutionMode        ExecutionMode          `json:"execution_mode"`
-	Status               string                 `json:"status"`
-	InputSchema          map[string]interface{} `json:"input_schema"`
-	OutputSchema         map[string]interface{} `json:"output_schema"`
-	SuccessCriteria      SuccessCriteria        `json:"success_criteria"`
-	Dependencies         []string               `json:"dependencies"`
-	DependenciesLabeled  map[string]string      `json:"dependencies_labeled"`
-	MCPServers           []string               `json:"mcp_servers"`
-	SequenceOrder        int                    `json:"sequence_order"`
-	ParentID             *string                `json:"parent_id"`
-	Rationale            *string                `json:"rationale"`
-	AccountID            string                 `json:"account_id"`
-	Code                 *string                `json:"code"`
-	Boundaries           map[string]interface{} `json:"boundaries"`
-	CreatedAt            time.Time              `json:"created_at"`
-	UpdatedAt            time.Time              `json:"updated_at"`
+	ID                  string                 `json:"id"`
+	Type                string                 `json:"type"`
+	Title               string                 `json:"title"`
+	Description         string                 `json:"description"`
+	ExecutionMode       ExecutionMode          `json:"execution_mode"`
+	Status              string                 `json:"status"`
+	InputSchema         map[string]interface{} `json:"input_schema"`
+	OutputSchema        map[string]interface{} `json:"output_schema"`
+	SuccessCriteria     SuccessCriteria        `json:"success_criteria"`
+	Dependencies        []string               `json:"dependencies"`
+	DependenciesLabeled map[string]string      `json:"dependencies_labeled"`
+	MCPServers          []string               `json:"mcp_servers"`
+	SequenceOrder       int                    `json:"sequence_order"`
+	ParentID            *string                `json:"parent_id"`
+	Rationale           *string                `json:"rationale"`
+	AccountID           string                 `json:"account_id"`
+	Code                *string                `json:"code"`
+	Boundaries          map[string]interface{} `json:"boundaries"`
+	CreatedAt           time.Time              `json:"created_at"`
+	UpdatedAt           time.Time              `json:"updated_at"`
 }
 
 // PendingDependency represents a labeled dependency that is not yet completed
@@ -155,8 +155,8 @@ type PlanNextResponse struct {
 }
 
 // TaskInfo represents a task from the plan/next API
-	type TaskInfo struct {
-		ID                  string                 `json:"id"`
+type TaskInfo struct {
+	ID                  string                 `json:"id"`
 	Title               string                 `json:"title"`
 	Description         string                 `json:"description"`
 	Rationale           string                 `json:"rationale,omitempty"`
@@ -168,14 +168,14 @@ type PlanNextResponse struct {
 	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
 	Dependencies        []string               `json:"dependencies"`
 	DependenciesLabeled map[string]string      `json:"dependencies_labeled"`
-		SequenceOrder       int                    `json:"sequence_order"`
+	SequenceOrder       int                    `json:"sequence_order"`
 	Status              string                 `json:"status,omitempty"`
-	}
+}
 
-	// ActivateEntityResponse is the response from the entity activate endpoint
-	type ActivateEntityResponse struct {
-		ActivatedCount int      `json:"activated_count"`
-		ActivatedIDs   []string `json:"activated_ids"`
+// ActivateEntityResponse is the response from the entity activate endpoint
+type ActivateEntityResponse struct {
+	ActivatedCount int      `json:"activated_count"`
+	ActivatedIDs   []string `json:"activated_ids"`
 	Error          string   `json:"error,omitempty"`
 }
 
