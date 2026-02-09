@@ -13,6 +13,8 @@ const (
 	ExecutionModePython        ExecutionMode = "PYTHON"
 	ExecutionModeAskUser       ExecutionMode = "ASK_USER"
 	ExecutionModeOrchestrate   ExecutionMode = "ORCHESTRATE"
+	ExecutionModeChoice        ExecutionMode = "CHOICE"
+	ExecutionModeCallToAction  ExecutionMode = "CALL_TO_ACTION"
 )
 
 // ExecutionAttemptStatus represents the status of an execution attempt

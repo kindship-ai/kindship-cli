@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -37,9 +38,9 @@ Examples:
 }
 
 var (
-	setupAgentID    string
-	setupSkipHooks  bool
-	setupForce      bool
+	setupAgentID   string
+	setupSkipHooks bool
+	setupForce     bool
 )
 
 func init() {
@@ -157,9 +158,11 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Println("\nSetup complete! You can now use:")
-	fmt.Println("  kindship status      Show current configuration")
-	fmt.Println("  kindship plan next   Get the next work item")
+	fmt.Println("\nSetup complete! You can now:")
+	fmt.Println("  kindship status --local     Show current configuration and active run")
+	fmt.Println("  kindship run local-next     Fetch and start the next task (local mode)")
+	fmt.Println("  kindship run local-complete Mark current task as completed")
+	fmt.Println("  kindship run local-fail     Mark current task as failed")
 
 	return nil
 }
@@ -234,56 +237,117 @@ func promptSelectAgent(agents []AgentInfo) (*AgentInfo, error) {
 }
 
 func installClaudeHooks(repoRoot string) error {
-	// Create .claude/hooks directory
-	hooksDir := repoRoot + "/.claude/hooks"
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		return fmt.Errorf("failed to create hooks directory: %w", err)
+	// Claude Code reads hooks from .claude/settings.local.json.
+	claudeDir := filepath.Join(repoRoot, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .claude directory: %w", err)
 	}
 
-	// Install start hook
-	startHook := `name: kindship-start
-trigger: start
-command: kindship hook start
-env:
-  KINDSHIP_HOOK_VERSION: "1"
-`
-	if err := os.WriteFile(hooksDir+"/start.yaml", []byte(startHook), 0644); err != nil {
-		return fmt.Errorf("failed to write start hook: %w", err)
+	settingsPath := filepath.Join(claudeDir, "settings.local.json")
+	settings := map[string]interface{}{}
+	if data, err := os.ReadFile(settingsPath); err == nil && len(data) > 0 {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("failed to parse %s: %w", settingsPath, err)
+		}
 	}
 
-	// Install stop hook
-	stopHook := `name: kindship-stop
-trigger: stop
-command: kindship hook stop
-env:
-  KINDSHIP_HOOK_VERSION: "1"
-args:
-  - --summary-file
-  - "{{summary_file}}"
-`
-	if err := os.WriteFile(hooksDir+"/stop.yaml", []byte(stopHook), 0644); err != nil {
-		return fmt.Errorf("failed to write stop hook: %w", err)
+	ensureHookCommand(settings, "SessionStart", "kindship hook start")
+	ensureHookCommand(settings, "Stop", "kindship hook stop --auto-continue")
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings.local.json: %w", err)
 	}
+	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", settingsPath, err)
+	}
+
+	// Cleanup old YAML hooks if present.
+	_ = os.Remove(filepath.Join(repoRoot, ".claude", "hooks", "start.yaml"))
+	_ = os.Remove(filepath.Join(repoRoot, ".claude", "hooks", "stop.yaml"))
 
 	// Create .claude/skills directory and install kindship skill
-	skillsDir := repoRoot + "/.claude/skills"
+	skillsDir := filepath.Join(repoRoot, ".claude", "skills")
 	if err := os.MkdirAll(skillsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create skills directory: %w", err)
 	}
 
 	kindshipSkill := `name: kindship
-version: 1
+version: 2
 commands:
   - name: next
-    description: Get next work item from planning
-    command: kindship plan next --json
+    description: Fetch and start the next Kindship task
+    command: kindship run local-next
+  - name: complete
+    description: Mark current task as completed
+    command: kindship run local-complete
+  - name: fail
+    description: Mark current task as failed
+    command: kindship run local-fail --reason "{{reason}}"
   - name: status
-    description: Show current repo and agent status
-    command: kindship status --json
+    description: Show agent and task status
+    command: kindship status --local
 `
-	if err := os.WriteFile(skillsDir+"/kindship.yaml", []byte(kindshipSkill), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(skillsDir, "kindship.yaml"), []byte(kindshipSkill), 0644); err != nil {
 		return fmt.Errorf("failed to write kindship skill: %w", err)
 	}
 
 	return nil
+}
+
+func ensureHookCommand(settings map[string]interface{}, event string, command string) {
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok || hooks == nil {
+		hooks = map[string]interface{}{}
+		settings["hooks"] = hooks
+	}
+
+	entries, ok := hooks[event].([]interface{})
+	if !ok || entries == nil {
+		entries = []interface{}{}
+	}
+
+	base := command
+	if idx := strings.Index(command, " --"); idx > 0 {
+		base = command[:idx]
+	}
+
+	// If a Kindship hook already exists under this event, update it in-place.
+	for _, e := range entries {
+		entry, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		hlist, ok := entry["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, h := range hlist {
+			hm, ok := h.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if hm["type"] != "command" {
+				continue
+			}
+			existing, _ := hm["command"].(string)
+			if strings.HasPrefix(existing, base) {
+				hm["command"] = command
+				hooks[event] = entries
+				return
+			}
+		}
+	}
+
+	// Append a new hook entry.
+	entries = append(entries, map[string]interface{}{
+		"matcher": "",
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":    "command",
+				"command": command,
+			},
+		},
+	})
+	hooks[event] = entries
 }

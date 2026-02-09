@@ -27,7 +27,7 @@ var (
 var ErrAskUserSkipped = errors.New("ASK_USER task started, awaiting user response")
 
 var runCmd = &cobra.Command{
-	Use:   "run <entity-id>",
+	Use:   "run [entity-id]",
 	Short: "Execute a planning entity",
 	Long: `Execute a planning entity by UUID.
 
@@ -35,6 +35,11 @@ The command fetches the entity details from the API and auto-detects the entity
 type. For PROCESS entities, it executes all child tasks in sequence. For all
 other entity types, it executes the single entity based on its execution_mode
 (LLM_REASONING, BASH, PYTHON, etc.) and reports the results back to the API.
+
+Local development subcommands:
+  kindship run local-next      Fetch + claim next task and print assignment markdown
+  kindship run local-complete  Mark the current local task run as SUCCESS
+  kindship run local-fail      Mark the current local task run as FAILED
 
 Configuration (flags take precedence over environment variables):
   --agent-id / AGENT_ID - The agent container ID
@@ -234,11 +239,14 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 
 	executionID := startResp.ExecutionID
 
-	// ASK_USER: create the run (RUNNING) but don't block — user responds via UI
-	if entityResp.Entity.ExecutionMode == api.ExecutionModeAskUser {
-		log.Info("ASK_USER task started, not blocking", map[string]interface{}{
+	// ASK_USER / CHOICE / CALL_TO_ACTION: create the run (RUNNING) but don't block — user responds via UI
+	if entityResp.Entity.ExecutionMode == api.ExecutionModeAskUser ||
+		entityResp.Entity.ExecutionMode == api.ExecutionModeChoice ||
+		entityResp.Entity.ExecutionMode == api.ExecutionModeCallToAction {
+		log.Info("Interactive task started, not blocking", map[string]interface{}{
 			"execution_id": executionID,
 			"entity_id":    params.EntityID,
+			"mode":         entityResp.Entity.ExecutionMode,
 		})
 		return false, ErrAskUserSkipped
 	}

@@ -1,8 +1,59 @@
 # Kindship CLI
 
-Go binary for secure credential injection in agent containers. Fetches secrets from the Kindship API and injects them as environment variables into CLI subprocesses.
+Kindship CLI supports:
+- **Local development**: authenticate as a user, bind a repo to an agent, and run/complete tasks (optionally driven by Claude Code hooks).
+- **Agent containers**: securely inject secrets into subprocesses via a service key (Kindship infra).
 
-## Usage
+## Local Development (Claude Code Hook Loop)
+
+### Quickstart
+
+```bash
+kindship login
+cd /path/to/your/repo
+kindship setup
+```
+
+Then start Claude Code in that repo. `kindship setup` installs:
+- `.claude/settings.local.json` hooks (SessionStart + Stop)
+- `.claude/skills/kindship.yaml` slash commands (`/kindship next`, `/kindship complete`, `/kindship fail`, `/kindship status`)
+
+### How The Loop Works
+
+On session start, Claude Code runs:
+- `kindship hook start`
+  - fetches the next task (`/api/cli/plan/next`)
+  - **claims it** by starting an execution run (`/api/planning/execution/start`)
+  - writes `.kindship/active_run.json`
+  - prints markdown task context to stdout (Claude sees it as session context)
+
+On session stop, Claude Code runs:
+- `kindship hook stop --auto-continue`
+  - reads the current `.kindship/active_run.json`
+  - **auto-completes** the run (`/api/planning/execution/{id}/complete`) using the session summary
+  - fetches and claims the next task
+  - if a next task exists, returns `{"decision":"block","reason":"..."}` to keep the loop going
+
+The loop stops normally when there are no more tasks, or when the transcript contains a user request to stop.
+
+### Manual Local Commands
+
+If you want to drive locally without hooks:
+
+```bash
+kindship run local-next
+kindship run local-complete
+kindship run local-fail --reason "blocked on X"
+kindship status --local
+```
+
+`local-complete` and `local-fail` accept optional `--outputs` JSON matching `api.ExecutionOutputs`.
+
+## Agent Containers (Service Key Mode)
+
+The original `kindship auth` flow is for Kindship agent containers. It fetches secrets from the Kindship API and injects them as environment variables into a subprocess.
+
+## Usage (Container Mode)
 
 ```bash
 kindship auth <command> [args...]
@@ -82,6 +133,11 @@ kindship-cli/
 ├── cmd/
 │   ├── root.go            # Root command setup
 │   ├── auth.go            # 'kindship auth' command
+│   ├── hook.go            # Claude Code hook handlers (local dev loop)
+│   ├── setup.go           # Repo binding + Claude Code integration setup
+│   ├── status.go          # Status + local run status
+│   ├── plan.go            # Plan submit/next (local)
+│   ├── login.go           # OAuth login (local)
 │   ├── agent.go           # 'kindship agent' command
 │   └── update.go          # 'kindship update' command
 ├── internal/

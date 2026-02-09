@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -214,6 +215,51 @@ func (c *Client) StartExecution(req ExecutionStartRequest, serviceKey string) (*
 	return &startResp, nil
 }
 
+// StartExecutionWithBearer creates a new execution attempt using bearer token auth
+// (Authorization: Bearer <token>).
+func (c *Client) StartExecutionWithBearer(req ExecutionStartRequest, bearerToken string) (*ExecutionStartResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/planning/execution/start", c.baseURL)
+	c.log("Starting execution (bearer) for entity: %s", req.EntityID)
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var startResp ExecutionStartResponse
+	if err := json.Unmarshal(body, &startResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Started execution (bearer): %s (attempt %d)", startResp.ExecutionID, startResp.AttemptNumber)
+	return &startResp, nil
+}
+
 // CompleteExecution marks an execution as complete
 func (c *Client) CompleteExecution(executionID string, req ExecutionCompleteRequest, serviceKey string) (*ExecutionCompleteResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/planning/execution/%s/complete", c.baseURL, executionID)
@@ -256,6 +302,63 @@ func (c *Client) CompleteExecution(executionID string, req ExecutionCompleteRequ
 
 	c.log("Execution completed successfully")
 	return &completeResp, nil
+}
+
+// CompleteExecutionWithBearer marks an execution as complete using bearer token auth
+// (Authorization: Bearer <token>).
+func (c *Client) CompleteExecutionWithBearer(executionID string, req ExecutionCompleteRequest, bearerToken string) (*ExecutionCompleteResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/planning/execution/%s/complete", c.baseURL, executionID)
+	c.log("Completing execution (bearer): %s (status: %s)", executionID, req.Status)
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var completeResp ExecutionCompleteResponse
+	if err := json.Unmarshal(body, &completeResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Execution completed successfully (bearer)")
+	return &completeResp, nil
+}
+
+func formatBearerHeader(tokenOrHeader string) string {
+	trimmed := strings.TrimSpace(tokenOrHeader)
+	if trimmed == "" {
+		return ""
+	}
+	// Accept either a raw token or a preformatted "Bearer ..." header value.
+	if strings.HasPrefix(strings.ToLower(trimmed), "bearer ") {
+		return trimmed
+	}
+	return "Bearer " + trimmed
 }
 
 // FetchNextTask gets the next runnable task for an agent.

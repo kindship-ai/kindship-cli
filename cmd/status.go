@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/kindship-ai/kindship-cli/internal/auth"
 	"github.com/kindship-ai/kindship-cli/internal/config"
@@ -27,30 +30,41 @@ Examples:
 }
 
 var (
-	statusJSON bool
+	statusJSON  bool
+	statusLocal bool
 )
 
 func init() {
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output in JSON format")
+	statusCmd.Flags().BoolVar(&statusLocal, "local", false, "Include local dev loop status (active run, hook config)")
 	rootCmd.AddCommand(statusCmd)
 }
 
 type StatusOutput struct {
-	Authenticated  bool   `json:"authenticated"`
-	AuthMethod     string `json:"auth_method,omitempty"`
-	UserEmail      string `json:"user_email,omitempty"`
-	UserID         string `json:"user_id,omitempty"`
-	TokenPrefix    string `json:"token_prefix,omitempty"`
-	TokenExpiry    string `json:"token_expiry,omitempty"`
-	InRepo         bool   `json:"in_repo"`
-	RepoRoot       string `json:"repo_root,omitempty"`
-	AgentID        string `json:"agent_id,omitempty"`
-	AgentSlug      string `json:"agent_slug,omitempty"`
-	AccountID      string `json:"account_id,omitempty"`
-	BoundAt        string `json:"bound_at,omitempty"`
-	APIBaseURL     string `json:"api_base_url,omitempty"`
-	HooksInstalled bool   `json:"hooks_installed"`
-	Error          string `json:"error,omitempty"`
+	Authenticated  bool             `json:"authenticated"`
+	AuthMethod     string           `json:"auth_method,omitempty"`
+	UserEmail      string           `json:"user_email,omitempty"`
+	UserID         string           `json:"user_id,omitempty"`
+	TokenPrefix    string           `json:"token_prefix,omitempty"`
+	TokenExpiry    string           `json:"token_expiry,omitempty"`
+	InRepo         bool             `json:"in_repo"`
+	RepoRoot       string           `json:"repo_root,omitempty"`
+	AgentID        string           `json:"agent_id,omitempty"`
+	AgentSlug      string           `json:"agent_slug,omitempty"`
+	AccountID      string           `json:"account_id,omitempty"`
+	BoundAt        string           `json:"bound_at,omitempty"`
+	APIBaseURL     string           `json:"api_base_url,omitempty"`
+	HooksInstalled bool             `json:"hooks_installed"`
+	ActiveRun      *ActiveRunStatus `json:"active_run,omitempty"`
+	Error          string           `json:"error,omitempty"`
+}
+
+type ActiveRunStatus struct {
+	EntityID      string `json:"entity_id"`
+	RunID         string `json:"run_id"`
+	TaskTitle     string `json:"task_title,omitempty"`
+	ExecutionMode string `json:"execution_mode,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -89,6 +103,22 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 		// Check for Claude Code hooks
 		output.HooksInstalled = checkHooksInstalled(repoRoot)
+
+		// Local dev loop status: active run file.
+		if statusLocal {
+			if active, err := loadActiveRun(repoRoot); err == nil && active != nil && active.RunID != "" {
+				ar := &ActiveRunStatus{
+					EntityID:      active.EntityID,
+					RunID:         active.RunID,
+					TaskTitle:     active.TaskTitle,
+					ExecutionMode: active.ExecutionMode,
+				}
+				if !active.StartedAt.IsZero() {
+					ar.StartedAt = active.StartedAt.Format("2006-01-02 15:04:05")
+				}
+				output.ActiveRun = ar
+			}
+		}
 	}
 
 	if statusJSON {
@@ -154,6 +184,26 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	if statusLocal && output.InRepo {
+		fmt.Println("Local Dev Loop:")
+		if output.ActiveRun != nil {
+			fmt.Printf("  ✓ Active run: %s\n", output.ActiveRun.RunID)
+			fmt.Printf("    Entity: %s\n", output.ActiveRun.EntityID)
+			if output.ActiveRun.TaskTitle != "" {
+				fmt.Printf("    Task: %s\n", output.ActiveRun.TaskTitle)
+			}
+			if output.ActiveRun.ExecutionMode != "" {
+				fmt.Printf("    Mode: %s\n", output.ActiveRun.ExecutionMode)
+			}
+			if output.ActiveRun.StartedAt != "" {
+				fmt.Printf("    Started: %s\n", output.ActiveRun.StartedAt)
+			}
+		} else {
+			fmt.Println("  ✗ No active run")
+		}
+		fmt.Println()
+	}
+
 	// API section
 	if output.APIBaseURL != "" {
 		fmt.Printf("API: %s\n", output.APIBaseURL)
@@ -163,19 +213,69 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 func checkHooksInstalled(repoRoot string) bool {
-	startHookPath := repoRoot + "/.claude/hooks/start.yaml"
-	stopHookPath := repoRoot + "/.claude/hooks/stop.yaml"
+	if hooksInstalledSettingsLocalJSON(repoRoot) {
+		return true
+	}
 
-	if !fileExists(startHookPath) {
-		return false
-	}
-	if !fileExists(stopHookPath) {
-		return false
-	}
-	return true
+	// Backward compatible: old YAML hook format.
+	startHookPath := filepath.Join(repoRoot, ".claude", "hooks", "start.yaml")
+	stopHookPath := filepath.Join(repoRoot, ".claude", "hooks", "stop.yaml")
+	return fileExists(startHookPath) && fileExists(stopHookPath)
 }
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func hooksInstalledSettingsLocalJSON(repoRoot string) bool {
+	path := filepath.Join(repoRoot, ".claude", "settings.local.json")
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok || hooks == nil {
+		return false
+	}
+
+	return hookEventHasCommand(hooks, "SessionStart", "kindship hook start") &&
+		hookEventHasCommand(hooks, "Stop", "kindship hook stop")
+}
+
+func hookEventHasCommand(hooks map[string]interface{}, event string, prefix string) bool {
+	rawEntries, ok := hooks[event].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, rawEntry := range rawEntries {
+		entry, ok := rawEntry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		rawHooks, ok := entry["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, rawHook := range rawHooks {
+			h, ok := rawHook.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if h["type"] != "command" {
+				continue
+			}
+			cmd, _ := h["command"].(string)
+			if strings.HasPrefix(cmd, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
