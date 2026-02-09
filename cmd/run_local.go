@@ -86,6 +86,27 @@ func runLocalNext(cmd *cobra.Command, args []string) error {
 		_ = rotateActiveRunIfStale(repoRoot, active)
 		active, _ = loadActiveRun(repoRoot)
 	}
+	// Process loop mode: delegate to dev loop helpers.
+	if repoCfg.ProcessID != "" {
+		if active != nil && active.IsProcessLoop() {
+			// Resume existing process task.
+			_, markdown, err := startDevLoopTask(ctx, repoCfg, repoRoot, active.ProcessRunID, active.ProcessTasks, active.TaskIndex, "")
+			if err != nil {
+				return fmt.Errorf("resume dev loop task: %w", err)
+			}
+			fmt.Print(markdown)
+			return nil
+		}
+		// Start fresh cycle.
+		_, markdown, err := startDevLoopCycle(ctx, repoCfg, repoRoot)
+		if err != nil {
+			return fmt.Errorf("start dev loop cycle: %w", err)
+		}
+		fmt.Print(markdown)
+		return nil
+	}
+
+	// Non-process mode: resume or claim individual tasks.
 	if active != nil {
 		// Don't claim another task; require explicit completion/failure.
 		if active.Task != nil {
@@ -136,6 +157,21 @@ func runLocalComplete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Process loop mode: advance to next task or new cycle.
+	if active.IsProcessLoop() {
+		markdown, shouldBlock, err := advanceDevLoop(ctx, repoCfg, repoRoot, active, outputs)
+		if err != nil {
+			return fmt.Errorf("advance dev loop: %w", err)
+		}
+		if shouldBlock {
+			fmt.Print(markdown)
+		} else {
+			fmt.Println("Dev loop cycle completed.")
+		}
+		return nil
+	}
+
+	// Non-process mode: complete and clear.
 	req := api.ExecutionCompleteRequest{
 		Status: api.ExecutionAttemptStatusSuccess,
 	}
@@ -153,7 +189,6 @@ func runLocalComplete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Completed Kindship run %s (entity %s).\n", active.RunID, active.EntityID)
-	_ = repoCfg // reserved for future status improvements
 	return nil
 }
 
@@ -174,6 +209,16 @@ func runLocalFail(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no active run found (nothing to fail)")
 	}
 
+	// Process loop mode: fail current task, clear state.
+	if active.IsProcessLoop() {
+		if err := failDevLoop(ctx, repoRoot, active, localFailReason); err != nil {
+			return fmt.Errorf("fail dev loop task: %w", err)
+		}
+		fmt.Fprintf(os.Stdout, "Failed dev loop task %s (entity %s): %s\n", active.RunID, active.EntityID, localFailReason)
+		return nil
+	}
+
+	// Non-process mode: fail and clear.
 	outputs, err := parseExecutionOutputsJSON(localFailOutputs)
 	if err != nil {
 		return err

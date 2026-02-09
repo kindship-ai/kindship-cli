@@ -82,6 +82,33 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 		_ = rotateActiveRunIfStale(repoRoot, active)
 		active, _ = loadActiveRun(repoRoot)
 	}
+	// Process loop mode: delegate to dev loop helpers.
+	if repoConfig.ProcessID != "" {
+		if active != nil && active.IsProcessLoop() {
+			// Resume existing process task via idempotent execution/start.
+			_, markdown, err := startDevLoopTask(ctx, repoConfig, repoRoot, active.ProcessRunID, active.ProcessTasks, active.TaskIndex, sessionID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: resume failed, starting fresh: %v\n", err)
+			} else {
+				fmt.Print(markdown)
+				return nil
+			}
+		}
+		// No active process run or resume failed — start fresh cycle.
+		state, markdown, err := startDevLoopCycle(ctx, repoConfig, repoRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: dev loop start failed: %v\n", err)
+			return nil
+		}
+		state.SessionID = sessionID
+		if err := saveActiveRun(repoRoot, state); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not persist active run: %v\n", err)
+		}
+		fmt.Print(markdown)
+		return nil
+	}
+
+	// Non-process mode: resume or claim individual tasks.
 	if active != nil {
 		if active.Task != nil {
 			fmt.Print(formatKindshipTaskMarkdown(repoConfig.AgentSlug, active.Task, active.RunID, active.ExecutionMode))
@@ -159,16 +186,49 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 	active, err := loadActiveRun(repoRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not read active run: %v\n", err)
-	} else if active != nil && active.RunID != "" {
-		outputs := &api.ExecutionOutputs{
-			Stdout: stopInput.Summary,
-			Structured: map[string]interface{}{
-				"session_id":      stopInput.SessionID,
-				"files_modified":  stopInput.FilesModified,
-				"transcript_path": stopInput.TranscriptPath,
-				"summary":         stopInput.Summary,
-			},
+	}
+
+	// Process loop mode: delegate to dev loop helpers.
+	if active != nil && active.IsProcessLoop() {
+		if stopDetected || !hookAutoContinue {
+			// Complete current task only, don't advance.
+			outputs := buildStopOutputs(stopInput)
+			completeReq := api.ExecutionCompleteRequest{
+				Status:  api.ExecutionAttemptStatusSuccess,
+				Outputs: outputs,
+			}
+			client := api.NewClient(ctx.APIBaseURL, verbose)
+			if _, err := client.CompleteExecutionWithBearer(active.RunID, completeReq, ctx.Token); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Could not complete execution %s: %v\n", active.RunID, err)
+			}
+			if err := clearActiveRun(repoRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Could not clear active run: %v\n", err)
+			}
+			return nil
 		}
+
+		// Auto-continue: advance the dev loop (complete → next task or new cycle).
+		outputs := buildStopOutputs(stopInput)
+		markdown, shouldBlock, err := advanceDevLoop(ctx, repoCfg, repoRoot, active, outputs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: dev loop advance failed: %v\n", err)
+			if clearErr := clearActiveRun(repoRoot); clearErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not clear active run: %v\n", clearErr)
+			}
+			return nil
+		}
+		if shouldBlock {
+			return printJSON(struct {
+				Decision string `json:"decision"`
+				Reason   string `json:"reason"`
+			}{"block", markdown})
+		}
+		return nil
+	}
+
+	// Non-process mode: complete and clear.
+	if active != nil && active.RunID != "" {
+		outputs := buildStopOutputs(stopInput)
 		completeReq := api.ExecutionCompleteRequest{
 			Status:  api.ExecutionAttemptStatusSuccess,
 			Outputs: outputs,
@@ -361,6 +421,18 @@ func transcriptRequestsStop(transcriptPath string) bool {
 type autoContinueState struct {
 	LastTaskID string `json:"last_task_id"`
 	Count      int    `json:"count"`
+}
+
+func buildStopOutputs(stopInput hookStopInput) *api.ExecutionOutputs {
+	return &api.ExecutionOutputs{
+		Stdout: stopInput.Summary,
+		Structured: map[string]interface{}{
+			"session_id":      stopInput.SessionID,
+			"files_modified":  stopInput.FilesModified,
+			"transcript_path": stopInput.TranscriptPath,
+			"summary":         stopInput.Summary,
+		},
+	}
 }
 
 func autoContinueGuard(repoRoot string, nextTaskID string) (bool, error) {

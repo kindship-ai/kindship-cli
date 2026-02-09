@@ -169,6 +169,7 @@ type PlanNextResponse struct {
 	Dependencies        []string               `json:"dependencies"`
 	DependenciesLabeled map[string]string      `json:"dependencies_labeled"`
 		SequenceOrder       int                    `json:"sequence_order"`
+	Status              string                 `json:"status,omitempty"`
 	}
 
 	// ActivateEntityResponse is the response from the entity activate endpoint
@@ -176,6 +177,22 @@ type PlanNextResponse struct {
 		ActivatedCount int      `json:"activated_count"`
 		ActivatedIDs   []string `json:"activated_ids"`
 	Error          string   `json:"error,omitempty"`
+}
+
+// StartProcessRunResponse is the response from the process start-run endpoint
+type StartProcessRunResponse struct {
+	ProcessRunID  string     `json:"process_run_id"`
+	AttemptNumber int        `json:"attempt_number"`
+	Resumed       bool       `json:"resumed"`
+	Tasks         []TaskInfo `json:"tasks"`
+	Error         string     `json:"error,omitempty"`
+}
+
+// CreateDevLoopResponse is the response from the create-dev-loop endpoint
+type CreateDevLoopResponse struct {
+	ProcessID string `json:"process_id"`
+	Created   bool   `json:"created"`
+	Error     string `json:"error,omitempty"`
 }
 
 // ResumedRun represents a run that should be resumed after container restart

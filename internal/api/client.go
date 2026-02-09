@@ -587,3 +587,91 @@ func (c *Client) RecoverRuns(agentID, serviceKey string) (*RecoverRunsResponse, 
 		len(recoverResp.ResumedRuns), recoverResp.FailedCount, recoverResp.SkippedAskUser)
 	return &recoverResp, nil
 }
+
+// StartProcessRunWithBearer starts a new ORCHESTRATE run on a process (or resumes existing).
+func (c *Client) StartProcessRunWithBearer(processID, bearerToken string) (*StartProcessRunResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/process/%s/start-run", c.baseURL, processID)
+	c.log("Starting process run for: %s", processID)
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var startResp StartProcessRunResponse
+	if err := json.Unmarshal(body, &startResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Process run: %s (attempt %d, resumed=%v, tasks=%d)",
+		startResp.ProcessRunID, startResp.AttemptNumber, startResp.Resumed, len(startResp.Tasks))
+	return &startResp, nil
+}
+
+// CreateDevLoopWithBearer creates a dev loop process for an agent using server-side blueprint.
+func (c *Client) CreateDevLoopWithBearer(agentID, bearerToken string) (*CreateDevLoopResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/process/create-dev-loop", c.baseURL)
+	c.log("Creating dev loop for agent: %s", agentID)
+
+	reqBody := struct {
+		AgentID string `json:"agent_id"`
+	}{AgentID: agentID}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var devLoopResp CreateDevLoopResponse
+	if err := json.Unmarshal(body, &devLoopResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Dev loop: process_id=%s, created=%v", devLoopResp.ProcessID, devLoopResp.Created)
+	return &devLoopResp, nil
+}

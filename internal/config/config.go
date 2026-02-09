@@ -48,6 +48,7 @@ type RepoConfig struct {
 	AgentSlug string    `json:"agent_slug,omitempty"`
 	AccountID string    `json:"account_id,omitempty"`
 	BoundAt   time.Time `json:"bound_at,omitempty"`
+	ProcessID string    `json:"process_id,omitempty"` // dev loop process
 }
 
 // GetGlobalConfigDir returns the path to the global config directory

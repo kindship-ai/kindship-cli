@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kindship-ai/kindship-cli/internal/api"
 	"github.com/kindship-ai/kindship-cli/internal/auth"
 	"github.com/kindship-ai/kindship-cli/internal/config"
 
@@ -81,6 +82,26 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Step 2: Check for existing configuration
 	existingConfig, _ := config.LoadRepoConfig()
 	if existingConfig != nil && existingConfig.AgentID != "" && !setupForce {
+		// Agent already bound. If process is missing (CLI upgrade), create it.
+		if existingConfig.ProcessID == "" {
+			fmt.Printf("Repository linked to agent: %s (upgrading to dev loop)\n\n", existingConfig.AgentID)
+			upgradeCtx, upgradeErr := auth.GetAuthContext()
+			if upgradeErr != nil {
+				return upgradeErr
+			}
+			processID, processErr := createDevLoopProcess(upgradeCtx, existingConfig.AgentID)
+			if processErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Could not create dev loop process: %v\n", processErr)
+				return nil
+			}
+			existingConfig.ProcessID = processID
+			if err := config.SaveRepoConfig(existingConfig, repoRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Could not save process ID: %v\n", err)
+				return nil
+			}
+			fmt.Printf("✓ Dev loop process created\n")
+			return nil
+		}
 		fmt.Printf("This repository is already linked to agent: %s\n", existingConfig.AgentID)
 		fmt.Println("Use --force to overwrite the existing configuration.")
 		return nil
@@ -147,6 +168,21 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n✓ Repository linked to agent '%s'\n", selectedAgent.Title)
 	fmt.Printf("  Configuration saved to .kindship/config.json\n")
+
+	// Create dev loop process via server-side blueprint (idempotent).
+	if repoConfig.ProcessID == "" || setupForce {
+		processID, err := createDevLoopProcess(ctx, repoConfig.AgentID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nWarning: Could not create dev loop process: %v\n", err)
+		} else {
+			repoConfig.ProcessID = processID
+			if err := config.SaveRepoConfig(repoConfig, repoRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Could not save process ID: %v\n", err)
+			} else {
+				fmt.Printf("\n✓ Dev loop process created\n")
+			}
+		}
+	}
 
 	// Step 7: Install Claude Code hooks (if not skipped)
 	if !setupSkipHooks {
@@ -234,6 +270,15 @@ func promptSelectAgent(agents []AgentInfo) (*AgentInfo, error) {
 	}
 
 	return &agents[num-1], nil
+}
+
+func createDevLoopProcess(ctx *auth.Context, agentID string) (string, error) {
+	client := api.NewClient(ctx.APIBaseURL, verbose)
+	resp, err := client.CreateDevLoopWithBearer(agentID, ctx.Token)
+	if err != nil {
+		return "", err
+	}
+	return resp.ProcessID, nil
 }
 
 func installClaudeHooks(repoRoot string) error {

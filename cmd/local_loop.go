@@ -33,6 +33,17 @@ type ActiveRun struct {
 	StartedAt     time.Time     `json:"started_at"`
 	SessionID     string        `json:"session_id,omitempty"`
 	Task          *api.TaskInfo `json:"task,omitempty"`
+
+	// Process loop fields (empty = legacy non-process mode)
+	ProcessRunID string         `json:"process_run_id,omitempty"`
+	TaskIndex    int            `json:"task_index,omitempty"`
+	TaskCount    int            `json:"task_count,omitempty"`
+	ProcessTasks []api.TaskInfo `json:"process_tasks,omitempty"`
+}
+
+// IsProcessLoop returns true if this active run is part of a dev loop process cycle.
+func (a *ActiveRun) IsProcessLoop() bool {
+	return a.ProcessRunID != ""
 }
 
 func activeRunPath(repoRoot string) string {
