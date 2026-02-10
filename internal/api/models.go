@@ -181,11 +181,12 @@ type ActivateEntityResponse struct {
 
 // StartProcessRunResponse is the response from the process start-run endpoint
 type StartProcessRunResponse struct {
-	ProcessRunID  string     `json:"process_run_id"`
-	AttemptNumber int        `json:"attempt_number"`
-	Resumed       bool       `json:"resumed"`
-	Tasks         []TaskInfo `json:"tasks"`
-	Error         string     `json:"error,omitempty"`
+	ProcessRunID         string                 `json:"process_run_id"`
+	RunNumber            int                    `json:"run_number"`
+	Resumed              bool                   `json:"resumed"`
+	Tasks                []TaskInfo             `json:"tasks"`
+	PreviousCycleOutputs map[string]interface{} `json:"previous_cycle_outputs,omitempty"`
+	Error                string                 `json:"error,omitempty"`
 }
 
 // CreateDevLoopResponse is the response from the create-dev-loop endpoint

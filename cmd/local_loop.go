@@ -204,11 +204,7 @@ func formatKindshipTaskMarkdown(agentSlug string, task *api.TaskInfo, runID stri
 
 	// Cycle and step info (WS2, WS5)
 	if active != nil && active.IsProcessLoop() {
-		if active.CycleCount > 0 {
-			b.WriteString(fmt.Sprintf("### Cycle %d — %s (Step %d of %d)\n", active.CycleCount, task.Title, active.TaskIndex+1, active.TaskCount))
-		} else {
-			b.WriteString(fmt.Sprintf("### Current Task: %s (Step %d of %d)\n", task.Title, active.TaskIndex+1, active.TaskCount))
-		}
+		b.WriteString(fmt.Sprintf("### Cycle %d — %s (Step %d of %d)\n", active.CycleCount, task.Title, active.TaskIndex+1, active.TaskCount))
 		// Progress indicator
 		steps := []string{"Decide", "Build", "Validate"}
 		var progress strings.Builder

@@ -39,17 +39,27 @@ func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot strin
 		}
 		// All tasks COMPLETED but ORCHESTRATE run still RUNNING — complete it and restart
 		if allCompleted {
-			return completeAndRestartCycle(ctx, cfg, repoRoot, resp.ProcessRunID, resp.Tasks)
+			return completeAndRestartCycle(ctx, cfg, repoRoot, resp.ProcessRunID, resp.Tasks, resp.RunNumber)
 		}
 	}
 
-	return startDevLoopTask(ctx, cfg, repoRoot, resp.ProcessRunID, resp.Tasks, startIndex, "")
+	state, markdown, err := startDevLoopTask(ctx, cfg, repoRoot, resp.ProcessRunID, resp.Tasks, startIndex, "")
+	if err != nil {
+		return nil, "", err
+	}
+	state.CycleCount = resp.RunNumber
+	if err := saveActiveRun(repoRoot, state); err != nil {
+		return nil, "", fmt.Errorf("save state: %w", err)
+	}
+	// Regenerate markdown with cycle count
+	markdown = formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
+	return state, markdown, nil
 }
 
 // completeAndRestartCycle handles the edge case where start-run resumed an
 // existing ORCHESTRATE run but all child tasks are already COMPLETED (interrupt
 // happened between last task complete and ORCHESTRATE complete).
-func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, processRunID string, tasks []api.TaskInfo) (*ActiveRun, string, error) {
+func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, processRunID string, tasks []api.TaskInfo, runNumber int) (*ActiveRun, string, error) {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
 	orchestrateComplete := api.ExecutionCompleteRequest{
@@ -57,6 +67,7 @@ func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot
 		Outputs: &api.ExecutionOutputs{
 			Structured: map[string]interface{}{
 				"tasks_executed": len(tasks),
+				"cycle_number":  runNumber,
 			},
 		},
 	}
@@ -157,6 +168,7 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, 
 		Outputs: &api.ExecutionOutputs{
 			Structured: map[string]interface{}{
 				"tasks_executed": active.TaskCount,
+				"cycle_number":  active.CycleCount,
 			},
 		},
 	}
@@ -170,7 +182,6 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, 
 		return "", false, fmt.Errorf("start new cycle: %w", err)
 	}
 	state.SessionID = active.SessionID
-	state.CycleCount = active.CycleCount + 1
 	if err := saveActiveRun(repoRoot, state); err != nil {
 		return "", false, err
 	}

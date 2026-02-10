@@ -623,8 +623,8 @@ func (c *Client) StartProcessRunWithBearer(processID, bearerToken string) (*Star
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	c.log("Process run: %s (attempt %d, resumed=%v, tasks=%d)",
-		startResp.ProcessRunID, startResp.AttemptNumber, startResp.Resumed, len(startResp.Tasks))
+	c.log("Process run: %s (run %d, resumed=%v, tasks=%d)",
+		startResp.ProcessRunID, startResp.RunNumber, startResp.Resumed, len(startResp.Tasks))
 	return &startResp, nil
 }
 
