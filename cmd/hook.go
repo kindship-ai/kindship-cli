@@ -84,6 +84,7 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 	}
 	// Process loop mode: delegate to dev loop helpers.
 	if repoConfig.ProcessID != "" {
+		cleanupStaleFiles(repoRoot)
 		if active != nil && active.IsProcessLoop() {
 			// Resume existing process task via idempotent execution/start.
 			_, markdown, err := startDevLoopTask(ctx, repoConfig, repoRoot, active.ProcessRunID, active.ProcessTasks, active.TaskIndex, sessionID)
@@ -91,6 +92,15 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "Warning: resume failed, starting fresh: %v\n", err)
 			} else {
 				fmt.Print(markdown)
+				if active.IsProcessLoop() {
+					writeSessionEvent(repoRoot, map[string]interface{}{
+						"event": "task_started",
+						"task":  active.TaskTitle,
+						"cycle": active.CycleCount,
+						"step":  active.TaskIndex + 1,
+						"total": active.TaskCount,
+					})
+				}
 				return nil
 			}
 		}
@@ -105,13 +115,22 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "Warning: could not persist active run: %v\n", err)
 		}
 		fmt.Print(markdown)
+		if state != nil && state.IsProcessLoop() {
+			writeSessionEvent(repoRoot, map[string]interface{}{
+				"event": "task_started",
+				"task":  state.TaskTitle,
+				"cycle": state.CycleCount,
+				"step":  state.TaskIndex + 1,
+				"total": state.TaskCount,
+			})
+		}
 		return nil
 	}
 
 	// Non-process mode: resume or claim individual tasks.
 	if active != nil {
 		if active.Task != nil {
-			fmt.Print(formatKindshipTaskMarkdown(repoConfig.AgentSlug, active.Task, active.RunID, active.ExecutionMode))
+			fmt.Print(formatKindshipTaskMarkdown(repoConfig.AgentSlug, active.Task, active.RunID, active.ExecutionMode, active))
 			return nil
 		}
 		fmt.Printf("Active Kindship run detected.\nEntity: %s | Run: %s | Mode: %s\n\nUse `/kindship complete` or `/kindship fail --reason \"...\"`.\n", active.EntityID, active.RunID, active.ExecutionMode)
@@ -140,7 +159,7 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 		// Still output the assignment; user can proceed manually.
 	}
 
-	fmt.Print(formatKindshipTaskMarkdown(repoConfig.AgentSlug, task, run.RunID, run.ExecutionMode))
+	fmt.Print(formatKindshipTaskMarkdown(repoConfig.AgentSlug, task, run.RunID, run.ExecutionMode, nil))
 	return nil
 }
 
@@ -193,6 +212,7 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 		if stopDetected || !hookAutoContinue {
 			// Complete current task only, don't advance.
 			outputs := buildStopOutputs(stopInput)
+			enrichOutputsForTask(active, outputs, repoRoot)
 			completeReq := api.ExecutionCompleteRequest{
 				Status:  api.ExecutionAttemptStatusSuccess,
 				Outputs: outputs,
@@ -204,11 +224,19 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 			if err := clearActiveRun(repoRoot); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Could not clear active run: %v\n", err)
 			}
+			writeSessionEvent(repoRoot, map[string]interface{}{
+				"event": "task_completed",
+				"task":  active.TaskTitle,
+				"cycle": active.CycleCount,
+				"step":  active.TaskIndex + 1,
+				"total": active.TaskCount,
+			})
 			return nil
 		}
 
 		// Auto-continue: advance the dev loop (complete → next task or new cycle).
 		outputs := buildStopOutputs(stopInput)
+		enrichOutputsForTask(active, outputs, repoRoot)
 		markdown, shouldBlock, err := advanceDevLoop(ctx, repoCfg, repoRoot, active, outputs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: dev loop advance failed: %v\n", err)
@@ -278,7 +306,7 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 		Reason   string `json:"reason"`
 	}{
 		Decision: "block",
-		Reason:   formatKindshipTaskMarkdown(repoCfg.AgentSlug, next, run.RunID, run.ExecutionMode),
+		Reason:   formatKindshipTaskMarkdown(repoCfg.AgentSlug, next, run.RunID, run.ExecutionMode, nil),
 	}
 	return printJSON(decision)
 }
@@ -460,4 +488,27 @@ func autoContinueGuard(repoRoot string, nextTaskID string) (bool, error) {
 	}
 
 	return st.Count >= 3, nil
+}
+
+func writeSessionEvent(repoRoot string, event map[string]interface{}) {
+	sessDir := filepath.Join(repoRoot, config.ConfigDir, "sessions")
+	if err := os.MkdirAll(sessDir, config.ConfigDirMode); err != nil {
+		return
+	}
+	// Use date-based filename
+	filename := time.Now().UTC().Format("2006-01-02") + ".jsonl"
+	path := filepath.Join(sessDir, filename)
+
+	event["ts"] = time.Now().UTC().Format(time.RFC3339)
+	line, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(line, '\n'))
 }

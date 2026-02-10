@@ -110,7 +110,7 @@ func runLocalNext(cmd *cobra.Command, args []string) error {
 	if active != nil {
 		// Don't claim another task; require explicit completion/failure.
 		if active.Task != nil {
-			fmt.Print(formatKindshipTaskMarkdown(repoCfg.AgentSlug, active.Task, active.RunID, active.ExecutionMode))
+			fmt.Print(formatKindshipTaskMarkdown(repoCfg.AgentSlug, active.Task, active.RunID, active.ExecutionMode, active))
 			return nil
 		}
 		fmt.Printf("Active Kindship run detected.\nEntity: %s | Run: %s | Mode: %s\n\nUse `/kindship complete` or `/kindship fail --reason \"...\"`.\n", active.EntityID, active.RunID, active.ExecutionMode)
@@ -134,7 +134,7 @@ func runLocalNext(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Print(formatKindshipTaskMarkdown(repoCfg.AgentSlug, task, run.RunID, run.ExecutionMode))
+	fmt.Print(formatKindshipTaskMarkdown(repoCfg.AgentSlug, task, run.RunID, run.ExecutionMode, nil))
 	return nil
 }
 

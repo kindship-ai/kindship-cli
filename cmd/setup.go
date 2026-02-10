@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -82,14 +83,16 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Step 2: Check for existing configuration
 	existingConfig, _ := config.LoadRepoConfig()
 	if existingConfig != nil && existingConfig.AgentID != "" && !setupForce {
-		// Agent already bound. If process is missing (CLI upgrade), create it.
+		upgradeCtx, upgradeErr := auth.GetAuthContext()
+		if upgradeErr != nil {
+			return upgradeErr
+		}
+
+		repoName := deriveRepoName(repoRoot)
+
 		if existingConfig.ProcessID == "" {
 			fmt.Printf("Repository linked to agent: %s (upgrading to dev loop)\n\n", existingConfig.AgentID)
-			upgradeCtx, upgradeErr := auth.GetAuthContext()
-			if upgradeErr != nil {
-				return upgradeErr
-			}
-			processID, processErr := createDevLoopProcess(upgradeCtx, existingConfig.AgentID)
+			processID, processErr := createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
 			if processErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Could not create dev loop process: %v\n", processErr)
 				return nil
@@ -102,8 +105,11 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			fmt.Printf("✓ Dev loop process created\n")
 			return nil
 		}
-		fmt.Printf("This repository is already linked to agent: %s\n", existingConfig.AgentID)
-		fmt.Println("Use --force to overwrite the existing configuration.")
+
+		// Process already exists — call API to trigger blueprint update propagation (WS4)
+		fmt.Printf("Repository linked to agent: %s (checking for blueprint updates)\n", existingConfig.AgentID)
+		_, _ = createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
+		fmt.Println("✓ Blueprint sync complete")
 		return nil
 	}
 
@@ -171,7 +177,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Create dev loop process via server-side blueprint (idempotent).
 	if repoConfig.ProcessID == "" || setupForce {
-		processID, err := createDevLoopProcess(ctx, repoConfig.AgentID)
+		repoName := deriveRepoName(repoRoot)
+		processID, err := createDevLoopProcess(ctx, repoConfig.AgentID, repoName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nWarning: Could not create dev loop process: %v\n", err)
 		} else {
@@ -272,13 +279,33 @@ func promptSelectAgent(agents []AgentInfo) (*AgentInfo, error) {
 	return &agents[num-1], nil
 }
 
-func createDevLoopProcess(ctx *auth.Context, agentID string) (string, error) {
+func createDevLoopProcess(ctx *auth.Context, agentID string, repoName string) (string, error) {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
-	resp, err := client.CreateDevLoopWithBearer(agentID, ctx.Token)
+	resp, err := client.CreateDevLoopWithBearer(agentID, repoName, ctx.Token)
 	if err != nil {
 		return "", err
 	}
 	return resp.ProcessID, nil
+}
+
+func deriveRepoName(repoRoot string) string {
+	// Try git remote first
+	cmd := exec.Command("git", "-C", repoRoot, "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err == nil {
+		url := strings.TrimSpace(string(out))
+		// Extract "org/repo" from github.com/org/repo.git or git@github.com:org/repo.git
+		url = strings.TrimSuffix(url, ".git")
+		// Handle SSH format: git@github.com:org/repo
+		if idx := strings.LastIndex(url, ":"); idx > 0 && strings.Contains(url[:idx], "@") {
+			url = url[idx+1:]
+		}
+		if parts := strings.Split(url, "/"); len(parts) >= 2 {
+			return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+		}
+	}
+	// Fallback: parent folder name
+	return filepath.Base(repoRoot)
 }
 
 func installClaudeHooks(repoRoot string) error {

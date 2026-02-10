@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
@@ -102,13 +104,14 @@ func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string
 		TaskIndex:     index,
 		TaskCount:     len(tasks),
 		ProcessTasks:  tasks,
+		Inputs:        startResp.Inputs,
 	}
 
 	if err := saveActiveRun(repoRoot, state); err != nil {
 		return nil, "", fmt.Errorf("save state: %w", err)
 	}
 
-	markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, &task, startResp.ExecutionID, task.ExecutionMode)
+	markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, &task, startResp.ExecutionID, task.ExecutionMode, state)
 	return state, markdown, nil
 }
 
@@ -131,10 +134,16 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, 
 
 	// 2a. More tasks in current cycle
 	if nextIndex < active.TaskCount {
-		_, markdown, err := startDevLoopTask(ctx, cfg, repoRoot, active.ProcessRunID, active.ProcessTasks, nextIndex, active.SessionID)
+		state, _, err := startDevLoopTask(ctx, cfg, repoRoot, active.ProcessRunID, active.ProcessTasks, nextIndex, active.SessionID)
 		if err != nil {
 			return "", false, err
 		}
+		// Carry cycle count forward within same cycle
+		state.CycleCount = active.CycleCount
+		if err := saveActiveRun(repoRoot, state); err != nil {
+			return "", false, err
+		}
+		markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
 		return markdown, true, nil
 	}
 
@@ -156,14 +165,17 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, 
 	}
 
 	// Start new cycle
-	state, markdown, err := startDevLoopCycle(ctx, cfg, repoRoot)
+	state, _, err := startDevLoopCycle(ctx, cfg, repoRoot)
 	if err != nil {
 		return "", false, fmt.Errorf("start new cycle: %w", err)
 	}
 	state.SessionID = active.SessionID
+	state.CycleCount = active.CycleCount + 1
 	if err := saveActiveRun(repoRoot, state); err != nil {
 		return "", false, err
 	}
+	// Regenerate markdown with correct cycle count
+	markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
 	return markdown, true, nil
 }
 
@@ -182,4 +194,75 @@ func failDevLoop(ctx *auth.Context, repoRoot string, active *ActiveRun, reason s
 	}
 
 	return clearActiveRun(repoRoot)
+}
+
+// enrichOutputsForTask adds task-specific structured data to execution outputs.
+func enrichOutputsForTask(active *ActiveRun, outputs *api.ExecutionOutputs, repoRoot string) {
+	if outputs == nil || outputs.Structured == nil {
+		return
+	}
+
+	switch active.TaskIndex {
+	case 0: // Decide
+		// Parse summary for structured plan data
+		if summary, ok := outputs.Structured["summary"].(string); ok && summary != "" {
+			outputs.Structured["task_type"] = "decide"
+			// Best-effort: leave summary as-is for the next step
+		}
+
+	case 1: // Build
+		// Capture git commit info
+		outputs.Structured["task_type"] = "build"
+		if sha, msg, stat, err := getLastCommitInfo(repoRoot); err == nil {
+			outputs.Structured["commit_sha"] = sha
+			outputs.Structured["commit_message"] = msg
+			outputs.Structured["diff_stat"] = stat
+		}
+		// Check for uncommitted changes
+		if hasUncommitted(repoRoot) {
+			outputs.Structured["commit_warning"] = "uncommitted changes detected"
+		}
+
+	case 2: // Validate
+		outputs.Structured["task_type"] = "validate"
+	}
+}
+
+func getLastCommitInfo(repoRoot string) (sha, message, diffStat string, err error) {
+	// Get SHA
+	shaOut, err := execGit(repoRoot, "log", "-1", "--format=%H")
+	if err != nil {
+		return "", "", "", err
+	}
+	sha = strings.TrimSpace(shaOut)
+
+	// Get message
+	msgOut, err := execGit(repoRoot, "log", "-1", "--format=%s")
+	if err != nil {
+		return sha, "", "", nil
+	}
+	message = strings.TrimSpace(msgOut)
+
+	// Get diff stat
+	statOut, err := execGit(repoRoot, "diff", "--stat", "HEAD~1")
+	if err != nil {
+		return sha, message, "", nil
+	}
+	diffStat = strings.TrimSpace(statOut)
+
+	return sha, message, diffStat, nil
+}
+
+func hasUncommitted(repoRoot string) bool {
+	out, err := execGit(repoRoot, "status", "--porcelain")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) != ""
+}
+
+func execGit(repoRoot string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+	out, err := cmd.Output()
+	return string(out), err
 }

@@ -39,6 +39,12 @@ type ActiveRun struct {
 	TaskIndex    int            `json:"task_index,omitempty"`
 	TaskCount    int            `json:"task_count,omitempty"`
 	ProcessTasks []api.TaskInfo `json:"process_tasks,omitempty"`
+
+	// Context from API (inputs from previous step outputs)
+	Inputs map[string]interface{} `json:"inputs,omitempty"`
+
+	// Cycle tracking
+	CycleCount int `json:"cycle_count,omitempty"`
 }
 
 // IsProcessLoop returns true if this active run is part of a dev loop process cycle.
@@ -121,6 +127,27 @@ func rotateActiveRunIfStale(repoRoot string, run *ActiveRun) error {
 	return nil
 }
 
+func cleanupStaleFiles(repoRoot string) {
+	kindshipDir := filepath.Join(repoRoot, config.ConfigDir)
+	entries, err := os.ReadDir(kindshipDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "active_run.stale.") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(kindshipDir, entry.Name()))
+		}
+	}
+}
+
 func startLocalExecutionForTask(ctx *auth.Context, repoCfg *config.RepoConfig, task *api.TaskInfo) (*ActiveRun, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("auth context is nil")
@@ -157,7 +184,7 @@ func startLocalExecutionForTask(ctx *auth.Context, repoCfg *config.RepoConfig, t
 	}, nil
 }
 
-func formatKindshipTaskMarkdown(agentSlug string, task *api.TaskInfo, runID string, executionMode string) string {
+func formatKindshipTaskMarkdown(agentSlug string, task *api.TaskInfo, runID string, executionMode string, active *ActiveRun) string {
 	if task == nil {
 		return "No pending Kindship tasks."
 	}
@@ -174,12 +201,81 @@ func formatKindshipTaskMarkdown(agentSlug string, task *api.TaskInfo, runID stri
 	var b strings.Builder
 	b.WriteString("## Kindship Task Assignment\n\n")
 	b.WriteString(fmt.Sprintf("You are working as Kindship agent **%s**.\n\n", agentLabel))
-	b.WriteString(fmt.Sprintf("### Current Task: %s\n", task.Title))
+
+	// Cycle and step info (WS2, WS5)
+	if active != nil && active.IsProcessLoop() {
+		if active.CycleCount > 0 {
+			b.WriteString(fmt.Sprintf("### Cycle %d — %s (Step %d of %d)\n", active.CycleCount, task.Title, active.TaskIndex+1, active.TaskCount))
+		} else {
+			b.WriteString(fmt.Sprintf("### Current Task: %s (Step %d of %d)\n", task.Title, active.TaskIndex+1, active.TaskCount))
+		}
+		// Progress indicator
+		steps := []string{"Decide", "Build", "Validate"}
+		var progress strings.Builder
+		progress.WriteString("Progress: ")
+		for i, step := range steps {
+			if i < active.TaskIndex {
+				progress.WriteString(fmt.Sprintf("[x] %s  ", step))
+			} else if i == active.TaskIndex {
+				progress.WriteString(fmt.Sprintf("[>] %s  ", step))
+			} else {
+				progress.WriteString(fmt.Sprintf("[ ] %s  ", step))
+			}
+		}
+		b.WriteString(progress.String())
+		b.WriteString("\n")
+	} else {
+		b.WriteString(fmt.Sprintf("### Current Task: %s\n", task.Title))
+	}
+
 	b.WriteString(fmt.Sprintf("Entity: `%s` | Run: `%s` | Mode: %s\n\n", task.ID, runID, mode))
 
 	if strings.TrimSpace(task.Description) != "" {
 		b.WriteString(task.Description)
 		b.WriteString("\n\n")
+	}
+
+	// Context from previous step (WS1)
+	if active != nil && active.Inputs != nil {
+		if prevData, ok := active.Inputs["prev"]; ok {
+			b.WriteString("### Context from Previous Step\n")
+			if prevMap, ok := prevData.(map[string]interface{}); ok {
+				// Try to render each key nicely
+				for key, val := range prevMap {
+					label := key
+					// Try to find matching task title from ProcessTasks
+					if active.TaskIndex > 0 && active.TaskIndex-1 < len(active.ProcessTasks) {
+						label = active.ProcessTasks[active.TaskIndex-1].Title
+					}
+					b.WriteString(fmt.Sprintf("**%s**:\n", label))
+					switch v := val.(type) {
+					case map[string]interface{}:
+						if raw, err := json.MarshalIndent(v, "", "  "); err == nil {
+							b.WriteString("```json\n")
+							b.WriteString(string(raw))
+							b.WriteString("\n```\n")
+						}
+					case string:
+						b.WriteString(v)
+						b.WriteString("\n")
+					default:
+						if raw, err := json.MarshalIndent(val, "", "  "); err == nil {
+							b.WriteString("```json\n")
+							b.WriteString(string(raw))
+							b.WriteString("\n```\n")
+						}
+					}
+				}
+			} else {
+				// Render as JSON block
+				if raw, err := json.MarshalIndent(prevData, "", "  "); err == nil {
+					b.WriteString("```json\n")
+					b.WriteString(string(raw))
+					b.WriteString("\n```\n")
+				}
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	if strings.TrimSpace(task.Rationale) != "" {
@@ -192,6 +288,38 @@ func formatKindshipTaskMarkdown(agentSlug string, task *api.TaskInfo, runID stri
 		b.WriteString("### Success Criteria\n")
 		b.WriteString(formatSuccessCriteriaMarkdown(task.SuccessCriteria))
 		b.WriteString("\n\n")
+	}
+
+	// Boundaries (WS5)
+	if len(task.Boundaries) > 0 {
+		b.WriteString("### Boundaries\n")
+		if scope, ok := task.Boundaries["scope_boundaries"]; ok {
+			if items, ok := scope.([]interface{}); ok {
+				for _, item := range items {
+					if s, ok := item.(string); ok {
+						b.WriteString(fmt.Sprintf("- %s\n", s))
+					}
+				}
+			}
+		}
+		if limits, ok := task.Boundaries["resource_limits"]; ok {
+			if limMap, ok := limits.(map[string]interface{}); ok {
+				for k, v := range limMap {
+					b.WriteString(fmt.Sprintf("- %s: %v\n", k, v))
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// Output schema (WS5)
+	if len(task.OutputSchema) > 0 {
+		b.WriteString("### Expected Output Schema\n")
+		if raw, err := json.MarshalIndent(task.OutputSchema, "", "  "); err == nil {
+			b.WriteString("```json\n")
+			b.WriteString(string(raw))
+			b.WriteString("\n```\n\n")
+		}
 	}
 
 	if task.Code != nil && strings.TrimSpace(*task.Code) != "" {

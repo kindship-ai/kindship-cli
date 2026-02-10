@@ -629,13 +629,14 @@ func (c *Client) StartProcessRunWithBearer(processID, bearerToken string) (*Star
 }
 
 // CreateDevLoopWithBearer creates a dev loop process for an agent using server-side blueprint.
-func (c *Client) CreateDevLoopWithBearer(agentID, bearerToken string) (*CreateDevLoopResponse, error) {
+func (c *Client) CreateDevLoopWithBearer(agentID, repoName, bearerToken string) (*CreateDevLoopResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/process/create-dev-loop", c.baseURL)
-	c.log("Creating dev loop for agent: %s", agentID)
+	c.log("Creating dev loop for agent: %s (repo: %s)", agentID, repoName)
 
 	reqBody := struct {
-		AgentID string `json:"agent_id"`
-	}{AgentID: agentID}
+		AgentID  string `json:"agent_id"`
+		RepoName string `json:"repo_name,omitempty"`
+	}{AgentID: agentID, RepoName: repoName}
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
