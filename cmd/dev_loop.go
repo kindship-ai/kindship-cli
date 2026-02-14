@@ -46,7 +46,8 @@ func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, sessionID stri
 		return nil, "", err
 	}
 	state.CycleCount = resp.RunNumber
-	// Regenerate markdown with cycle count
+	state.Attachments = resp.Attachments
+	// Regenerate markdown with cycle count and attachments
 	markdown = formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
 	return state, markdown, nil
 }
@@ -140,8 +141,9 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, active *ActiveRun
 		if err != nil {
 			return "", false, err
 		}
-		// Carry cycle count forward within same cycle
+		// Carry cycle count and attachments forward within same cycle
 		state.CycleCount = active.CycleCount
+		state.Attachments = active.Attachments
 		markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
 		return markdown, true, nil
 	}

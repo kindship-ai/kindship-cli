@@ -92,24 +92,28 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 		if existingConfig.ProcessID == "" {
 			fmt.Printf("Repository linked to agent: %s (upgrading to dev loop)\n\n", existingConfig.AgentID)
-			processID, processErr := createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
+			resp, processErr := createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
 			if processErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Could not create dev loop process: %v\n", processErr)
 				return nil
 			}
-			existingConfig.ProcessID = processID
+			existingConfig.ProcessID = resp.ProcessID
 			if err := config.SaveRepoConfig(existingConfig, repoRoot); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Could not save process ID: %v\n", err)
 				return nil
 			}
 			fmt.Printf("✓ Dev loop process created\n")
+			installAttachmentSkill(upgradeCtx, existingConfig.AgentID, resp.Tasks, repoName)
 			return nil
 		}
 
 		// Process already exists — call API to trigger blueprint update propagation (WS4)
 		fmt.Printf("Repository linked to agent: %s (checking for blueprint updates)\n", existingConfig.AgentID)
-		_, _ = createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
+		resp, _ := createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
 		fmt.Println("✓ Blueprint sync complete")
+		if resp != nil {
+			installAttachmentSkill(upgradeCtx, existingConfig.AgentID, resp.Tasks, repoName)
+		}
 		return nil
 	}
 
@@ -176,19 +180,26 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Configuration saved to .kindship/config.json\n")
 
 	// Create dev loop process via server-side blueprint (idempotent).
+	repoName := deriveRepoName(repoRoot)
+	var devLoopTasks []api.DevLoopTask
 	if repoConfig.ProcessID == "" || setupForce {
-		repoName := deriveRepoName(repoRoot)
-		processID, err := createDevLoopProcess(ctx, repoConfig.AgentID, repoName)
+		resp, err := createDevLoopProcess(ctx, repoConfig.AgentID, repoName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nWarning: Could not create dev loop process: %v\n", err)
 		} else {
-			repoConfig.ProcessID = processID
+			repoConfig.ProcessID = resp.ProcessID
+			devLoopTasks = resp.Tasks
 			if err := config.SaveRepoConfig(repoConfig, repoRoot); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Could not save process ID: %v\n", err)
 			} else {
 				fmt.Printf("\n✓ Dev loop process created\n")
 			}
 		}
+	}
+
+	// Install attachment skill to agent container (non-fatal)
+	if repoConfig.ProcessID != "" {
+		installAttachmentSkill(ctx, repoConfig.AgentID, devLoopTasks, repoName)
 	}
 
 	// Step 7: Install Claude Code hooks (if not skipped)
@@ -279,13 +290,23 @@ func promptSelectAgent(agents []AgentInfo) (*AgentInfo, error) {
 	return &agents[num-1], nil
 }
 
-func createDevLoopProcess(ctx *auth.Context, agentID string, repoName string) (string, error) {
+func createDevLoopProcess(ctx *auth.Context, agentID string, repoName string) (*api.CreateDevLoopResponse, error) {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 	resp, err := client.CreateDevLoopWithBearer(agentID, repoName, ctx.Token)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resp.ProcessID, nil
+	return resp, nil
+}
+
+// findDecideEntityID finds the Decide task entity ID (sequence_order == 1) from tasks.
+func findDecideEntityID(tasks []api.DevLoopTask) string {
+	for _, t := range tasks {
+		if t.SequenceOrder == 1 {
+			return t.ID
+		}
+	}
+	return ""
 }
 
 func deriveRepoName(repoRoot string) string {
@@ -306,6 +327,92 @@ func deriveRepoName(repoRoot string) string {
 	}
 	// Fallback: parent folder name
 	return filepath.Base(repoRoot)
+}
+
+func installAttachmentSkill(ctx *auth.Context, agentID string, tasks []api.DevLoopTask, repoName string) {
+	decideEntityID := findDecideEntityID(tasks)
+	if decideEntityID == "" {
+		fmt.Fprintf(os.Stderr, "Warning: Could not find Decide task entity — skill not installed\n")
+		return
+	}
+
+	skillName := sanitizeSkillName(repoName)
+	skillContent := generateAttachmentSkill(repoName, decideEntityID)
+
+	client := api.NewClient(ctx.APIBaseURL, verbose)
+	if err := client.InstallSkill(agentID, skillName, skillContent, ctx.Token); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not install feature request skill: %v\n", err)
+		return
+	}
+	fmt.Printf("✓ Feature request skill installed (skills/%s/SKILL.md)\n", skillName)
+}
+
+func sanitizeSkillName(repoName string) string {
+	// Extract just the repo part (after the last /)
+	name := repoName
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	// Replace non-alphanumeric with hyphens
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	result := strings.Trim(b.String(), "-")
+	if result == "" {
+		result = "project"
+	}
+	return "feature-request-" + result
+}
+
+func generateAttachmentSkill(repoName, decideEntityID string) string {
+	return fmt.Sprintf(`---
+name: feature-request-%s
+description: Submit feature requests for %s development
+---
+
+## When to use this skill
+
+Use this when the user wants to request a feature, improvement, bug fix, or
+priority change for the **%s** project.
+
+Examples: "add dark mode", "fix the login bug", "prioritize performance",
+"I want a footer on the landing page"
+
+## How to add a feature request
+
+1. Read existing requests:
+`+"```"+`bash
+curl -s "$KINDSHIP_API_URL/api/cli/entity/%s/attachments?name=feature-requests.txt" \
+  -H "X-Kindship-Service-Key: $KINDSHIP_SERVICE_KEY" | jq -r '.content // ""'
+`+"```"+`
+
+2. Append the new request to the existing content and write back:
+`+"```"+`bash
+EXISTING=$(curl -s "$KINDSHIP_API_URL/api/cli/entity/%s/attachments?name=feature-requests.txt" \
+  -H "X-Kindship-Service-Key: $KINDSHIP_SERVICE_KEY" | jq -r '.content // ""')
+CONTENT="$(echo "$EXISTING"; echo "- NEW REQUEST DESCRIPTION")"
+jq -n --arg name "feature-requests.txt" --arg content "$CONTENT" \
+  '{name: $name, content: $content}' | \
+curl -s -X PUT "$KINDSHIP_API_URL/api/cli/entity/%s/attachments" \
+  -H "X-Kindship-Service-Key: $KINDSHIP_SERVICE_KEY" \
+  -H "Content-Type: application/json" -d @-
+`+"```"+`
+
+Replace "NEW REQUEST DESCRIPTION" with a clear, actionable summary.
+Confirm to the user that it was recorded for the next development cycle.
+
+## How to list feature requests
+
+`+"```"+`bash
+curl -s "$KINDSHIP_API_URL/api/cli/entity/%s/attachments?name=feature-requests.txt" \
+  -H "X-Kindship-Service-Key: $KINDSHIP_SERVICE_KEY" | jq -r '.content // "No feature requests yet."'
+`+"```"+`
+`, sanitizeSkillName(repoName), repoName, repoName, decideEntityID, decideEntityID, decideEntityID, decideEntityID)
 }
 
 func installClaudeHooks(repoRoot string) error {

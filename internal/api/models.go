@@ -180,6 +180,17 @@ type ActivateEntityResponse struct {
 	Error          string   `json:"error,omitempty"`
 }
 
+// EntityAttachment represents a text attachment on a planning entity
+type EntityAttachment struct {
+	ID        string                 `json:"id"`
+	EntityID  string                 `json:"entity_id"`
+	Type      string                 `json:"type"`
+	Name      string                 `json:"name"`
+	Metadata  map[string]interface{} `json:"metadata"`
+	CreatedAt string                 `json:"created_at"`
+	UpdatedAt string                 `json:"updated_at"`
+}
+
 // StartProcessRunResponse is the response from the process start-run endpoint
 type StartProcessRunResponse struct {
 	ProcessRunID         string                 `json:"process_run_id"`
@@ -187,14 +198,23 @@ type StartProcessRunResponse struct {
 	Resumed              bool                   `json:"resumed"`
 	Tasks                []TaskInfo             `json:"tasks"`
 	PreviousCycleOutputs map[string]interface{} `json:"previous_cycle_outputs,omitempty"`
+	Attachments          []EntityAttachment     `json:"attachments,omitempty"`
 	Error                string                 `json:"error,omitempty"`
+}
+
+// DevLoopTask represents a task entity returned by create-dev-loop
+type DevLoopTask struct {
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	SequenceOrder int    `json:"sequence_order"`
 }
 
 // CreateDevLoopResponse is the response from the create-dev-loop endpoint
 type CreateDevLoopResponse struct {
-	ProcessID string `json:"process_id"`
-	Created   bool   `json:"created"`
-	Error     string `json:"error,omitempty"`
+	ProcessID string        `json:"process_id"`
+	Created   bool          `json:"created"`
+	Tasks     []DevLoopTask `json:"tasks,omitempty"`
+	Error     string        `json:"error,omitempty"`
 }
 
 // ResumedRun represents a run that should be resumed after container restart

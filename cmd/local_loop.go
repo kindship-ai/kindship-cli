@@ -33,6 +33,9 @@ type ActiveRun struct {
 
 	// Cycle tracking
 	CycleCount int `json:"cycle_count,omitempty"`
+
+	// Attachments on task entities (injected per-task into Claude context)
+	Attachments []api.EntityAttachment `json:"attachments,omitempty"`
 }
 
 // IsProcessLoop returns true if this active run is part of a dev loop process cycle.
@@ -222,6 +225,35 @@ func formatKindshipTaskMarkdown(agentSlug string, task *api.TaskInfo, runID stri
 				}
 			}
 			b.WriteString("\n")
+		}
+	}
+
+	// Inject ALL process attachments grouped by task (not just current entity)
+	if active != nil && active.IsProcessLoop() && len(active.Attachments) > 0 {
+		b.WriteString("### Available Documents\n")
+		b.WriteString("Documents attached to tasks in this process.\n")
+		b.WriteString("Use `kindship attach read <name>` to read from current task.\n")
+		b.WriteString("Use `kindship attach read <name> --entity <id>` for other tasks.\n")
+		b.WriteString("Use `kindship attach write <name> --file <path>` to write to current task.\n\n")
+
+		for _, pt := range active.ProcessTasks {
+			var taskAtts []api.EntityAttachment
+			for _, att := range active.Attachments {
+				if att.EntityID == pt.ID {
+					taskAtts = append(taskAtts, att)
+				}
+			}
+			if len(taskAtts) > 0 {
+				marker := ""
+				if pt.ID == task.ID {
+					marker = " (current)"
+				}
+				b.WriteString(fmt.Sprintf("**%s** (`%s`)%s:\n", pt.Title, pt.ID, marker))
+				for _, att := range taskAtts {
+					b.WriteString(fmt.Sprintf("- %s (updated: %s)\n", att.Name, att.UpdatedAt))
+				}
+				b.WriteString("\n")
+			}
 		}
 	}
 

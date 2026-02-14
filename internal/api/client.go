@@ -683,6 +683,95 @@ func (c *Client) FetchActiveRunWithBearer(agentID, processID, bearerToken string
 	return &activeResp, nil
 }
 
+// UpdateRunOutput merges structured data into a running execution's outputs.
+// PATCH /api/planning/execution/{runID}/output
+func (c *Client) UpdateRunOutput(runID string, structured map[string]interface{}, bearerToken string) error {
+	endpoint := fmt.Sprintf("%s/api/planning/execution/%s/output", c.baseURL, runID)
+	c.log("Updating run output: %s", runID)
+
+	reqBody := struct {
+		Structured map[string]interface{} `json:"structured"`
+	}{Structured: structured}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	c.log("Run output updated successfully")
+	return nil
+}
+
+// InstallSkill writes a skill file to an agent's container.
+// POST /api/cli/agent/{agentID}/install-skill
+func (c *Client) InstallSkill(agentID, name, content, bearerToken string) error {
+	endpoint := fmt.Sprintf("%s/api/cli/agent/%s/install-skill", c.baseURL, agentID)
+	c.log("Installing skill '%s' for agent: %s", name, agentID)
+
+	reqBody := struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}{Name: name, Content: content}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	c.log("Skill installed successfully")
+	return nil
+}
+
 // CreateDevLoopWithBearer creates a dev loop process for an agent using server-side blueprint.
 func (c *Client) CreateDevLoopWithBearer(agentID, repoName, bearerToken string) (*CreateDevLoopResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/process/create-dev-loop", c.baseURL)
@@ -728,6 +817,133 @@ func (c *Client) CreateDevLoopWithBearer(agentID, repoName, bearerToken string) 
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	c.log("Dev loop: process_id=%s, created=%v", devLoopResp.ProcessID, devLoopResp.Created)
+	c.log("Dev loop: process_id=%s, created=%v, tasks=%d", devLoopResp.ProcessID, devLoopResp.Created, len(devLoopResp.Tasks))
 	return &devLoopResp, nil
+}
+
+// ReadAttachmentWithBearer reads a text attachment's content by name.
+// GET /api/cli/entity/{entityID}/attachments?name={name}
+func (c *Client) ReadAttachmentWithBearer(entityID, name, bearerToken string) (string, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/entity/%s/attachments?name=%s", c.baseURL, entityID, url.QueryEscape(name))
+	c.log("Reading attachment '%s' for entity: %s", name, entityID)
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Attachment read: %d bytes", len(result.Content))
+	return result.Content, nil
+}
+
+// UpsertAttachmentWithBearer creates or updates a text attachment.
+// PUT /api/cli/entity/{entityID}/attachments
+func (c *Client) UpsertAttachmentWithBearer(entityID, name, content, bearerToken string) error {
+	endpoint := fmt.Sprintf("%s/api/cli/entity/%s/attachments", c.baseURL, entityID)
+	c.log("Upserting attachment '%s' for entity: %s (%d bytes)", name, entityID, len(content))
+
+	reqBody := struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}{Name: name, Content: content}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPut, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	c.log("Attachment upserted successfully")
+	return nil
+}
+
+// ListAttachmentsWithBearer lists all attachments for an entity.
+// GET /api/cli/entity/{entityID}/attachments
+func (c *Client) ListAttachmentsWithBearer(entityID, bearerToken string) ([]EntityAttachment, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/entity/%s/attachments", c.baseURL, entityID)
+	c.log("Listing attachments for entity: %s", entityID)
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Attachments []EntityAttachment `json:"attachments"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Listed %d attachments", len(result.Attachments))
+	return result.Attachments, nil
 }
