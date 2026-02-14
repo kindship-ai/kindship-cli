@@ -324,7 +324,7 @@ func installClaudeHooks(repoRoot string) error {
 	}
 
 	ensureHookCommand(settings, "SessionStart", "kindship hook start")
-	ensureHookCommand(settings, "Stop", "kindship hook stop --auto-continue")
+	ensureHookCommand(settings, "Stop", "kindship hook stop")
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
