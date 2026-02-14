@@ -212,7 +212,6 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 		if stopDetected || !hookAutoContinue {
 			// Complete current task only, don't advance.
 			outputs := buildStopOutputs(stopInput)
-			enrichOutputsForTask(active, outputs, repoRoot)
 			completeReq := api.ExecutionCompleteRequest{
 				Status:  api.ExecutionAttemptStatusSuccess,
 				Outputs: outputs,
@@ -236,7 +235,6 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 
 		// Auto-continue: advance the dev loop (complete → next task or new cycle).
 		outputs := buildStopOutputs(stopInput)
-		enrichOutputsForTask(active, outputs, repoRoot)
 		markdown, shouldBlock, err := advanceDevLoop(ctx, repoCfg, repoRoot, active, outputs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: dev loop advance failed: %v\n", err)

@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
@@ -207,73 +205,3 @@ func failDevLoop(ctx *auth.Context, repoRoot string, active *ActiveRun, reason s
 	return clearActiveRun(repoRoot)
 }
 
-// enrichOutputsForTask adds task-specific structured data to execution outputs.
-func enrichOutputsForTask(active *ActiveRun, outputs *api.ExecutionOutputs, repoRoot string) {
-	if outputs == nil || outputs.Structured == nil {
-		return
-	}
-
-	switch active.TaskIndex {
-	case 0: // Decide
-		// Parse summary for structured plan data
-		if summary, ok := outputs.Structured["summary"].(string); ok && summary != "" {
-			outputs.Structured["task_type"] = "decide"
-			// Best-effort: leave summary as-is for the next step
-		}
-
-	case 1: // Build
-		// Capture git commit info
-		outputs.Structured["task_type"] = "build"
-		if sha, msg, stat, err := getLastCommitInfo(repoRoot); err == nil {
-			outputs.Structured["commit_sha"] = sha
-			outputs.Structured["commit_message"] = msg
-			outputs.Structured["diff_stat"] = stat
-		}
-		// Check for uncommitted changes
-		if hasUncommitted(repoRoot) {
-			outputs.Structured["commit_warning"] = "uncommitted changes detected"
-		}
-
-	case 2: // Validate
-		outputs.Structured["task_type"] = "validate"
-	}
-}
-
-func getLastCommitInfo(repoRoot string) (sha, message, diffStat string, err error) {
-	// Get SHA
-	shaOut, err := execGit(repoRoot, "log", "-1", "--format=%H")
-	if err != nil {
-		return "", "", "", err
-	}
-	sha = strings.TrimSpace(shaOut)
-
-	// Get message
-	msgOut, err := execGit(repoRoot, "log", "-1", "--format=%s")
-	if err != nil {
-		return sha, "", "", nil
-	}
-	message = strings.TrimSpace(msgOut)
-
-	// Get diff stat
-	statOut, err := execGit(repoRoot, "diff", "--stat", "HEAD~1")
-	if err != nil {
-		return sha, message, "", nil
-	}
-	diffStat = strings.TrimSpace(statOut)
-
-	return sha, message, diffStat, nil
-}
-
-func hasUncommitted(repoRoot string) bool {
-	out, err := execGit(repoRoot, "status", "--porcelain")
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(out) != ""
-}
-
-func execGit(repoRoot string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
-	out, err := cmd.Output()
-	return string(out), err
-}
