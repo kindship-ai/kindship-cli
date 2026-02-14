@@ -104,19 +104,22 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		// Check for Claude Code hooks
 		output.HooksInstalled = checkHooksInstalled(repoRoot)
 
-		// Local dev loop status: active run file.
-		if statusLocal {
-			if active, err := loadActiveRun(repoRoot); err == nil && active != nil && active.RunID != "" {
-				ar := &ActiveRunStatus{
-					EntityID:      active.EntityID,
-					RunID:         active.RunID,
-					TaskTitle:     active.TaskTitle,
-					ExecutionMode: active.ExecutionMode,
+		// Local dev loop status: fetch active run from DB.
+		if statusLocal && ctx != nil {
+			repoConfig, cfgErr := config.LoadRepoConfig()
+			if cfgErr == nil {
+				if active, fetchErr := fetchActiveRun(ctx, repoConfig); fetchErr == nil && active != nil && active.RunID != "" {
+					ar := &ActiveRunStatus{
+						EntityID:      active.EntityID,
+						RunID:         active.RunID,
+						TaskTitle:     active.TaskTitle,
+						ExecutionMode: active.ExecutionMode,
+					}
+					if !active.StartedAt.IsZero() {
+						ar.StartedAt = active.StartedAt.Format("2006-01-02 15:04:05")
+					}
+					output.ActiveRun = ar
 				}
-				if !active.StartedAt.IsZero() {
-					ar.StartedAt = active.StartedAt.Format("2006-01-02 15:04:05")
-				}
-				output.ActiveRun = ar
 			}
 		}
 	}

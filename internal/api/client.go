@@ -628,6 +628,61 @@ func (c *Client) StartProcessRunWithBearer(processID, bearerToken string) (*Star
 	return &startResp, nil
 }
 
+// FetchActiveRunWithBearer retrieves the currently active (RUNNING) task run for an agent.
+// Replaces local active_run.json file reads with a DB-backed API call.
+func (c *Client) FetchActiveRunWithBearer(agentID, processID, bearerToken string) (*ActiveRunResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/agent/active-run", c.baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	q := u.Query()
+	q.Set("agent_id", agentID)
+	if processID != "" {
+		q.Set("process_id", processID)
+	}
+	u.RawQuery = q.Encode()
+
+	c.log("Fetching active run for agent: %s", agentID)
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var activeResp ActiveRunResponse
+	if err := json.Unmarshal(body, &activeResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if activeResp.ActiveRun != nil {
+		c.log("Active run: %s (entity %s)", activeResp.ActiveRun.RunID, activeResp.ActiveRun.EntityID)
+	} else {
+		c.log("No active run for agent")
+	}
+
+	return &activeResp, nil
+}
+
 // CreateDevLoopWithBearer creates a dev loop process for an agent using server-side blueprint.
 func (c *Client) CreateDevLoopWithBearer(agentID, repoName, bearerToken string) (*CreateDevLoopResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/process/create-dev-loop", c.baseURL)

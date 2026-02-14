@@ -11,7 +11,7 @@ import (
 
 // startDevLoopCycle starts a new ORCHESTRATE run on the process and
 // begins the first non-COMPLETED task. Handles both fresh starts and resumes.
-func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string) (*ActiveRun, string, error) {
+func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, sessionID string) (*ActiveRun, string, error) {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
 	// Start process run (resets children + creates ORCHESTRATE run, or resumes existing)
@@ -37,18 +37,15 @@ func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot strin
 		}
 		// All tasks COMPLETED but ORCHESTRATE run still RUNNING — complete it and restart
 		if allCompleted {
-			return completeAndRestartCycle(ctx, cfg, repoRoot, resp.ProcessRunID, resp.Tasks, resp.RunNumber)
+			return completeAndRestartCycle(ctx, cfg, resp.ProcessRunID, resp.Tasks, resp.RunNumber, sessionID)
 		}
 	}
 
-	state, markdown, err := startDevLoopTask(ctx, cfg, repoRoot, resp.ProcessRunID, resp.Tasks, startIndex, "")
+	state, markdown, err := startDevLoopTask(ctx, cfg, resp.ProcessRunID, resp.Tasks, startIndex, sessionID)
 	if err != nil {
 		return nil, "", err
 	}
 	state.CycleCount = resp.RunNumber
-	if err := saveActiveRun(repoRoot, state); err != nil {
-		return nil, "", fmt.Errorf("save state: %w", err)
-	}
 	// Regenerate markdown with cycle count
 	markdown = formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
 	return state, markdown, nil
@@ -57,7 +54,7 @@ func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot strin
 // completeAndRestartCycle handles the edge case where start-run resumed an
 // existing ORCHESTRATE run but all child tasks are already COMPLETED (interrupt
 // happened between last task complete and ORCHESTRATE complete).
-func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, processRunID string, tasks []api.TaskInfo, runNumber int) (*ActiveRun, string, error) {
+func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, processRunID string, tasks []api.TaskInfo, runNumber int, sessionID string) (*ActiveRun, string, error) {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
 	orchestrateComplete := api.ExecutionCompleteRequest{
@@ -74,12 +71,12 @@ func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, repoRoot
 	}
 
 	// Now start fresh
-	return startDevLoopCycle(ctx, cfg, repoRoot)
+	return startDevLoopCycle(ctx, cfg, sessionID)
 }
 
 // startDevLoopTask starts execution on a specific task within the process cycle.
-// Saves state to active_run.json and returns formatted markdown.
-func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, processRunID string, tasks []api.TaskInfo, index int, sessionID string) (*ActiveRun, string, error) {
+// Returns the ActiveRun state and formatted markdown.
+func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, processRunID string, tasks []api.TaskInfo, index int, sessionID string) (*ActiveRun, string, error) {
 	if index < 0 || index >= len(tasks) {
 		return nil, "", fmt.Errorf("task index %d out of range (0..%d)", index, len(tasks)-1)
 	}
@@ -92,6 +89,7 @@ func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string
 		EntityID:      task.ID,
 		ExecutionMode: api.ExecutionMode(task.ExecutionMode),
 		AgentID:       cfg.AgentID,
+		SessionID:     sessionID,
 	}
 	startResp, err := client.StartExecutionWithBearer(startReq, ctx.Token)
 	if err != nil {
@@ -99,7 +97,6 @@ func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string
 	}
 
 	state := &ActiveRun{
-		Version:       activeRunVersion,
 		AgentID:       cfg.AgentID,
 		AgentSlug:     cfg.AgentSlug,
 		EntityID:      task.ID,
@@ -116,10 +113,6 @@ func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string
 		Inputs:        startResp.Inputs,
 	}
 
-	if err := saveActiveRun(repoRoot, state); err != nil {
-		return nil, "", fmt.Errorf("save state: %w", err)
-	}
-
 	markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, &task, startResp.ExecutionID, task.ExecutionMode, state)
 	return state, markdown, nil
 }
@@ -127,7 +120,7 @@ func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string
 // advanceDevLoop completes the current task run and either advances to the
 // next task in the cycle or starts a new cycle. Returns (markdown, shouldBlock, error).
 // shouldBlock=true means there's a next task to present.
-func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, active *ActiveRun, outputs *api.ExecutionOutputs) (string, bool, error) {
+func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, active *ActiveRun, outputs *api.ExecutionOutputs) (string, bool, error) {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
 	// 1. Complete current task run
@@ -143,15 +136,12 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, 
 
 	// 2a. More tasks in current cycle
 	if nextIndex < active.TaskCount {
-		state, _, err := startDevLoopTask(ctx, cfg, repoRoot, active.ProcessRunID, active.ProcessTasks, nextIndex, active.SessionID)
+		state, _, err := startDevLoopTask(ctx, cfg, active.ProcessRunID, active.ProcessTasks, nextIndex, active.SessionID)
 		if err != nil {
 			return "", false, err
 		}
 		// Carry cycle count forward within same cycle
 		state.CycleCount = active.CycleCount
-		if err := saveActiveRun(repoRoot, state); err != nil {
-			return "", false, err
-		}
 		markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
 		return markdown, true, nil
 	}
@@ -175,22 +165,18 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, repoRoot string, 
 	}
 
 	// Start new cycle
-	state, _, err := startDevLoopCycle(ctx, cfg, repoRoot)
+	state, _, err := startDevLoopCycle(ctx, cfg, active.SessionID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new cycle: %w", err)
-	}
-	state.SessionID = active.SessionID
-	if err := saveActiveRun(repoRoot, state); err != nil {
-		return "", false, err
 	}
 	// Regenerate markdown with correct cycle count
 	markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
 	return markdown, true, nil
 }
 
-// failDevLoop marks the current task as failed and clears state.
+// failDevLoop marks the current task as failed.
 // Does NOT advance to the next task — the user must resolve the failure.
-func failDevLoop(ctx *auth.Context, repoRoot string, active *ActiveRun, reason string) error {
+func failDevLoop(ctx *auth.Context, active *ActiveRun, reason string) error {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
 	failReason := reason
@@ -202,6 +188,5 @@ func failDevLoop(ctx *auth.Context, repoRoot string, active *ActiveRun, reason s
 		return fmt.Errorf("fail task run: %w", err)
 	}
 
-	return clearActiveRun(repoRoot)
+	return nil
 }
-

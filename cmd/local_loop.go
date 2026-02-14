@@ -3,8 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,17 +11,7 @@ import (
 	"github.com/kindship-ai/kindship-cli/internal/config"
 )
 
-const (
-	activeRunFileName = "active_run.json"
-	activeRunVersion  = 1
-)
-
-// Treat an active run file as stale after this duration and rotate it aside.
-// This is a safety valve for crashes or abandoned sessions, not a "task timeout".
-var activeRunStaleAfter = 72 * time.Hour
-
 type ActiveRun struct {
-	Version       int           `json:"version"`
 	AgentID       string        `json:"agent_id"`
 	AgentSlug     string        `json:"agent_slug,omitempty"`
 	EntityID      string        `json:"entity_id"`
@@ -34,7 +22,7 @@ type ActiveRun struct {
 	SessionID     string        `json:"session_id,omitempty"`
 	Task          *api.TaskInfo `json:"task,omitempty"`
 
-	// Process loop fields (empty = legacy non-process mode)
+	// Process loop fields (empty = non-process mode)
 	ProcessRunID string         `json:"process_run_id,omitempty"`
 	TaskIndex    int            `json:"task_index,omitempty"`
 	TaskCount    int            `json:"task_count,omitempty"`
@@ -52,103 +40,62 @@ func (a *ActiveRun) IsProcessLoop() bool {
 	return a.ProcessRunID != ""
 }
 
-func activeRunPath(repoRoot string) string {
-	return filepath.Join(repoRoot, config.ConfigDir, activeRunFileName)
-}
+// fetchActiveRun queries the API for the currently active (RUNNING) task run.
+// Returns nil, nil when there is no active run. Replaces the old file-based loadActiveRun.
+func fetchActiveRun(ctx *auth.Context, cfg *config.RepoConfig) (*ActiveRun, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("auth context is nil")
+	}
+	if cfg == nil || cfg.AgentID == "" {
+		return nil, fmt.Errorf("repo not configured with an agent")
+	}
 
-func loadActiveRun(repoRoot string) (*ActiveRun, error) {
-	path := activeRunPath(repoRoot)
-	data, err := os.ReadFile(path)
+	client := api.NewClient(ctx.APIBaseURL, verbose)
+	resp, err := client.FetchActiveRunWithBearer(cfg.AgentID, cfg.ProcessID, ctx.Token)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read active run: %w", err)
+		return nil, fmt.Errorf("fetch active run: %w", err)
+	}
+	if resp.ActiveRun == nil {
+		return nil, nil
 	}
 
-	var run ActiveRun
-	if err := json.Unmarshal(data, &run); err != nil {
-		return nil, fmt.Errorf("parse active run: %w", err)
+	d := resp.ActiveRun
+
+	// Parse started_at from API
+	startedAt, _ := time.Parse(time.RFC3339, d.StartedAt)
+
+	// Map API TaskInfo
+	var task *api.TaskInfo
+	if d.Task != nil {
+		task = d.Task
 	}
-	if run.Version == 0 {
-		run.Version = activeRunVersion
+
+	// Map process tasks
+	var processTasks []api.TaskInfo
+	if len(d.ProcessTasks) > 0 {
+		processTasks = d.ProcessTasks
 	}
-	return &run, nil
+
+	return &ActiveRun{
+		AgentID:       d.AgentID,
+		AgentSlug:     d.AgentSlug,
+		EntityID:      d.EntityID,
+		RunID:         d.RunID,
+		TaskTitle:     d.TaskTitle,
+		ExecutionMode: d.ExecutionMode,
+		StartedAt:     startedAt,
+		SessionID:     d.SessionID,
+		Task:          task,
+		ProcessRunID:  d.ProcessRunID,
+		TaskIndex:     d.TaskIndex,
+		TaskCount:     d.TaskCount,
+		ProcessTasks:  processTasks,
+		Inputs:        d.Inputs,
+		CycleCount:    d.CycleCount,
+	}, nil
 }
 
-func saveActiveRun(repoRoot string, run *ActiveRun) error {
-	if run == nil {
-		return fmt.Errorf("active run is nil")
-	}
-	if run.Version == 0 {
-		run.Version = activeRunVersion
-	}
-
-	kindshipDir := filepath.Join(repoRoot, config.ConfigDir)
-	if err := os.MkdirAll(kindshipDir, config.ConfigDirMode); err != nil {
-		return fmt.Errorf("create %s: %w", kindshipDir, err)
-	}
-
-	path := activeRunPath(repoRoot)
-	data, err := json.MarshalIndent(run, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal active run: %w", err)
-	}
-	// The file may contain task context; keep it owner-readable only.
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("write active run: %w", err)
-	}
-	return nil
-}
-
-func clearActiveRun(repoRoot string) error {
-	path := activeRunPath(repoRoot)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove active run: %w", err)
-	}
-	return nil
-}
-
-func rotateActiveRunIfStale(repoRoot string, run *ActiveRun) error {
-	if run == nil || run.StartedAt.IsZero() {
-		return nil
-	}
-	if time.Since(run.StartedAt) <= activeRunStaleAfter {
-		return nil
-	}
-
-	src := activeRunPath(repoRoot)
-	dst := filepath.Join(repoRoot, config.ConfigDir, fmt.Sprintf("active_run.stale.%s.json", time.Now().UTC().Format("20060102T150405Z")))
-	if err := os.Rename(src, dst); err != nil {
-		// If we can't rotate, don't block new work; just remove.
-		_ = os.Remove(src)
-		return nil
-	}
-	return nil
-}
-
-func cleanupStaleFiles(repoRoot string) {
-	kindshipDir := filepath.Join(repoRoot, config.ConfigDir)
-	entries, err := os.ReadDir(kindshipDir)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-7 * 24 * time.Hour)
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "active_run.stale.") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(kindshipDir, entry.Name()))
-		}
-	}
-}
-
-func startLocalExecutionForTask(ctx *auth.Context, repoCfg *config.RepoConfig, task *api.TaskInfo) (*ActiveRun, error) {
+func startLocalExecutionForTask(ctx *auth.Context, repoCfg *config.RepoConfig, task *api.TaskInfo, sessionID string) (*ActiveRun, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("auth context is nil")
 	}
@@ -164,6 +111,7 @@ func startLocalExecutionForTask(ctx *auth.Context, repoCfg *config.RepoConfig, t
 		EntityID:      task.ID,
 		ExecutionMode: api.ExecutionMode(task.ExecutionMode),
 		AgentID:       repoCfg.AgentID,
+		SessionID:     sessionID,
 	}
 
 	startResp, err := client.StartExecutionWithBearer(startReq, ctx.Token)
@@ -172,7 +120,6 @@ func startLocalExecutionForTask(ctx *auth.Context, repoCfg *config.RepoConfig, t
 	}
 
 	return &ActiveRun{
-		Version:       activeRunVersion,
 		AgentID:       repoCfg.AgentID,
 		AgentSlug:     repoCfg.AgentSlug,
 		EntityID:      task.ID,
@@ -180,6 +127,7 @@ func startLocalExecutionForTask(ctx *auth.Context, repoCfg *config.RepoConfig, t
 		TaskTitle:     task.Title,
 		ExecutionMode: task.ExecutionMode,
 		StartedAt:     time.Now(),
+		SessionID:     sessionID,
 		Task:          task,
 	}, nil
 }

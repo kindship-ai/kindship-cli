@@ -103,6 +103,7 @@ type ExecutionStartRequest struct {
 	ExecutionMode       ExecutionMode `json:"execution_mode"`
 	AgentID             string        `json:"agent_id"`
 	OrchestrationMethod string        `json:"orchestration_method,omitempty"`
+	SessionID           string        `json:"session_id,omitempty"`
 }
 
 // ExecutionStartResponse represents the response from starting an execution
@@ -210,4 +211,28 @@ type RecoverRunsResponse struct {
 	FailedCount    int          `json:"failed_count"`
 	SkippedAskUser int          `json:"skipped_ask_user"`
 	Error          string       `json:"error,omitempty"`
+}
+
+// ActiveRunResponse is the response from the active-run endpoint
+type ActiveRunResponse struct {
+	ActiveRun *ActiveRunData `json:"active_run"`
+}
+
+// ActiveRunData represents the DB-backed active run state
+type ActiveRunData struct {
+	AgentID       string                 `json:"agent_id"`
+	AgentSlug     string                 `json:"agent_slug"`
+	EntityID      string                 `json:"entity_id"`
+	RunID         string                 `json:"run_id"`
+	TaskTitle     string                 `json:"task_title"`
+	ExecutionMode string                 `json:"execution_mode"`
+	StartedAt     string                 `json:"started_at"`
+	SessionID     string                 `json:"session_id"`
+	Task          *TaskInfo              `json:"task"`
+	ProcessRunID  string                 `json:"process_run_id"`
+	TaskIndex     int                    `json:"task_index"`
+	TaskCount     int                    `json:"task_count"`
+	ProcessTasks  []TaskInfo             `json:"process_tasks"`
+	Inputs        map[string]interface{} `json:"inputs"`
+	CycleCount    int                    `json:"cycle_count"`
 }

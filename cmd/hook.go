@@ -76,18 +76,17 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Resume existing local run if present, unless stale.
-	active, err := loadActiveRun(repoRoot)
-	if err == nil && active != nil {
-		_ = rotateActiveRunIfStale(repoRoot, active)
-		active, _ = loadActiveRun(repoRoot)
+	// Resume existing active run if present (fetched from DB, staleness handled server-side).
+	active, err := fetchActiveRun(ctx, repoConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not fetch active run: %v\n", err)
 	}
+
 	// Process loop mode: delegate to dev loop helpers.
 	if repoConfig.ProcessID != "" {
-		cleanupStaleFiles(repoRoot)
 		if active != nil && active.IsProcessLoop() {
 			// Resume existing process task via idempotent execution/start.
-			_, markdown, err := startDevLoopTask(ctx, repoConfig, repoRoot, active.ProcessRunID, active.ProcessTasks, active.TaskIndex, sessionID)
+			_, markdown, err := startDevLoopTask(ctx, repoConfig, active.ProcessRunID, active.ProcessTasks, active.TaskIndex, sessionID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: resume failed, starting fresh: %v\n", err)
 			} else {
@@ -105,14 +104,10 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 			}
 		}
 		// No active process run or resume failed — start fresh cycle.
-		state, markdown, err := startDevLoopCycle(ctx, repoConfig, repoRoot)
+		state, markdown, err := startDevLoopCycle(ctx, repoConfig, sessionID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: dev loop start failed: %v\n", err)
 			return nil
-		}
-		state.SessionID = sessionID
-		if err := saveActiveRun(repoRoot, state); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not persist active run: %v\n", err)
 		}
 		fmt.Print(markdown)
 		if state != nil && state.IsProcessLoop() {
@@ -148,15 +143,10 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	run, err := startLocalExecutionForTask(ctx, repoConfig, task)
+	run, err := startLocalExecutionForTask(ctx, repoConfig, task, sessionID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not start execution: %v\n", err)
 		return nil
-	}
-	run.SessionID = sessionID
-	if err := saveActiveRun(repoRoot, run); err != nil {
-		fmt.Fprintf(os.Stderr, "Could not persist active run: %v\n", err)
-		// Still output the assignment; user can proceed manually.
 	}
 
 	fmt.Print(formatKindshipTaskMarkdown(repoConfig.AgentSlug, task, run.RunID, run.ExecutionMode, nil))
@@ -201,10 +191,10 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 
 	stopDetected := transcriptRequestsStop(stopInput.TranscriptPath)
 
-	// Auto-complete current run if we have one.
-	active, err := loadActiveRun(repoRoot)
+	// Fetch active run from DB.
+	active, err := fetchActiveRun(ctx, repoCfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Could not read active run: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: Could not fetch active run: %v\n", err)
 	}
 
 	// Process loop mode: delegate to dev loop helpers.
@@ -220,9 +210,6 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 			if _, err := client.CompleteExecutionWithBearer(active.RunID, completeReq, ctx.Token); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Could not complete execution %s: %v\n", active.RunID, err)
 			}
-			if err := clearActiveRun(repoRoot); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Could not clear active run: %v\n", err)
-			}
 			writeSessionEvent(repoRoot, map[string]interface{}{
 				"event": "task_completed",
 				"task":  active.TaskTitle,
@@ -235,12 +222,9 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 
 		// Auto-continue: advance the dev loop (complete → next task or new cycle).
 		outputs := buildStopOutputs(stopInput)
-		markdown, shouldBlock, err := advanceDevLoop(ctx, repoCfg, repoRoot, active, outputs)
+		markdown, shouldBlock, err := advanceDevLoop(ctx, repoCfg, active, outputs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: dev loop advance failed: %v\n", err)
-			if clearErr := clearActiveRun(repoRoot); clearErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not clear active run: %v\n", clearErr)
-			}
 			return nil
 		}
 		if shouldBlock {
@@ -263,8 +247,6 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 		client := api.NewClient(ctx.APIBaseURL, verbose)
 		if _, err := client.CompleteExecutionWithBearer(active.RunID, completeReq, ctx.Token); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Could not complete execution %s: %v\n", active.RunID, err)
-		} else if err := clearActiveRun(repoRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Could not clear active run: %v\n", err)
 		}
 	}
 
@@ -289,14 +271,10 @@ func runHookStop(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	run, err := startLocalExecutionForTask(ctx, repoCfg, next)
+	run, err := startLocalExecutionForTask(ctx, repoCfg, next, stopInput.SessionID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not start next execution: %v\n", err)
 		return nil
-	}
-	run.SessionID = stopInput.SessionID
-	if err := saveActiveRun(repoRoot, run); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Could not persist active run: %v\n", err)
 	}
 
 	decision := struct {

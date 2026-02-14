@@ -22,14 +22,13 @@ Then start Claude Code in that repo. `kindship setup` installs:
 
 On session start, Claude Code runs:
 - `kindship hook start`
-  - fetches the next task (`/api/cli/plan/next`)
-  - **claims it** by starting an execution run (`/api/planning/execution/start`)
-  - writes `.kindship/active_run.json`
+  - checks for an existing active run via the API (`/api/cli/agent/active-run`)
+  - if none, fetches the next task (`/api/cli/plan/next`) and **claims it** by starting an execution run (`/api/planning/execution/start`)
   - prints markdown task context to stdout (Claude sees it as session context)
 
 On session stop, Claude Code runs:
 - `kindship hook stop --auto-continue`
-  - reads the current `.kindship/active_run.json`
+  - fetches the current active run from the API (`/api/cli/agent/active-run`)
   - **auto-completes** the run (`/api/planning/execution/{id}/complete`) using the session summary
   - fetches and claims the next task
   - if a next task exists, returns `{"decision":"block","reason":"..."}` to keep the loop going
