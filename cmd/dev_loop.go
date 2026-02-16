@@ -9,8 +9,34 @@ import (
 	"github.com/kindship-ai/kindship-cli/internal/config"
 )
 
+func fetchScopedNextTaskForDevLoop(ctx *auth.Context, cfg *config.RepoConfig) (*api.PlanNextResponse, error) {
+	client := api.NewClient(ctx.APIBaseURL, verbose)
+	return client.FetchNextTaskScopedWithBearer(cfg.AgentID, cfg.ProcessID, ctx.Token)
+}
+
+func findProcessTaskIndex(tasks []api.TaskInfo, entityID string) int {
+	for i, task := range tasks {
+		if task.ID == entityID {
+			return i
+		}
+	}
+	return -1
+}
+
+func formatDevLoopWaitMarkdown(pendingCount, cycleCount int) string {
+	if pendingCount <= 0 {
+		return "No runnable tasks available."
+	}
+	return fmt.Sprintf(
+		"## Kindship Dev Loop\n\nCycle %d is waiting for %d pending task(s). Retry `kindship run local-next` later.\n",
+		cycleCount,
+		pendingCount,
+	)
+}
+
 // startDevLoopCycle starts a new ORCHESTRATE run on the process and
-// begins the first non-COMPLETED task. Handles both fresh starts and resumes.
+// claims the next runnable child task via scoped /plan/next.
+// Handles both fresh starts and resumes.
 func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, sessionID string) (*ActiveRun, string, error) {
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
@@ -24,24 +50,28 @@ func startDevLoopCycle(ctx *auth.Context, cfg *config.RepoConfig, sessionID stri
 		return nil, "", fmt.Errorf("process has no tasks")
 	}
 
-	// Find first non-COMPLETED task (handles resume after interrupt)
-	startIndex := 0
-	if resp.Resumed {
-		allCompleted := true
-		for i, t := range resp.Tasks {
-			if t.Status != "COMPLETED" {
-				startIndex = i
-				allCompleted = false
-				break
-			}
-		}
-		// All tasks COMPLETED but ORCHESTRATE run still RUNNING — complete it and restart
-		if allCompleted {
-			return completeAndRestartCycle(ctx, cfg, resp.ProcessRunID, resp.Tasks, resp.RunNumber, sessionID)
-		}
+	nextResp, err := fetchScopedNextTaskForDevLoop(ctx, cfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("fetch scoped next task: %w", err)
 	}
 
-	state, markdown, err := startDevLoopTask(ctx, cfg, resp.ProcessRunID, resp.Tasks, startIndex, sessionID)
+	// Queue drained while ORCHESTRATE run is still RUNNING (resume edge case).
+	if nextResp.Task == nil && nextResp.PendingCount == 0 && resp.Resumed {
+		return completeAndRestartCycle(ctx, cfg, resp.ProcessRunID, resp.Tasks, resp.RunNumber, sessionID)
+	}
+
+	if nextResp.Task == nil {
+		return nil, formatDevLoopWaitMarkdown(nextResp.PendingCount, resp.RunNumber), nil
+	}
+
+	state, markdown, err := startDevLoopTask(
+		ctx,
+		cfg,
+		resp.ProcessRunID,
+		resp.Tasks,
+		*nextResp.Task,
+		sessionID,
+	)
 	if err != nil {
 		return nil, "", err
 	}
@@ -63,7 +93,7 @@ func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, processR
 		Outputs: &api.ExecutionOutputs{
 			Structured: map[string]interface{}{
 				"tasks_executed": len(tasks),
-				"cycle_number":  runNumber,
+				"cycle_number":   runNumber,
 			},
 		},
 	}
@@ -75,14 +105,15 @@ func completeAndRestartCycle(ctx *auth.Context, cfg *config.RepoConfig, processR
 	return startDevLoopCycle(ctx, cfg, sessionID)
 }
 
-// startDevLoopTask starts execution on a specific task within the process cycle.
+// startDevLoopTask starts execution on a specific scoped task within the process cycle.
 // Returns the ActiveRun state and formatted markdown.
-func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, processRunID string, tasks []api.TaskInfo, index int, sessionID string) (*ActiveRun, string, error) {
-	if index < 0 || index >= len(tasks) {
-		return nil, "", fmt.Errorf("task index %d out of range (0..%d)", index, len(tasks)-1)
+func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, processRunID string, tasks []api.TaskInfo, task api.TaskInfo, sessionID string) (*ActiveRun, string, error) {
+	taskIndex := findProcessTaskIndex(tasks, task.ID)
+	if taskIndex < 0 {
+		tasks = append(tasks, task)
+		taskIndex = len(tasks) - 1
 	}
 
-	task := tasks[index]
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
 	if processRunID == "" {
@@ -113,7 +144,7 @@ func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, processRunID st
 		SessionID:     sessionID,
 		Task:          &task,
 		ProcessRunID:  processRunID,
-		TaskIndex:     index,
+		TaskIndex:     taskIndex,
 		TaskCount:     len(tasks),
 		ProcessTasks:  tasks,
 		Inputs:        startResp.Inputs,
@@ -138,11 +169,21 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, active *ActiveRun
 		return "", false, fmt.Errorf("complete task run: %w", err)
 	}
 
-	nextIndex := active.TaskIndex + 1
+	// 2. Ask the server for the next runnable child task in this process scope.
+	nextResp, err := fetchScopedNextTaskForDevLoop(ctx, cfg)
+	if err != nil {
+		return "", false, fmt.Errorf("fetch scoped next task: %w", err)
+	}
 
-	// 2a. More tasks in current cycle
-	if nextIndex < active.TaskCount {
-		state, _, err := startDevLoopTask(ctx, cfg, active.ProcessRunID, active.ProcessTasks, nextIndex, active.SessionID)
+	if nextResp.Task != nil {
+		state, _, err := startDevLoopTask(
+			ctx,
+			cfg,
+			active.ProcessRunID,
+			active.ProcessTasks,
+			*nextResp.Task,
+			active.SessionID,
+		)
 		if err != nil {
 			return "", false, err
 		}
@@ -153,7 +194,11 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, active *ActiveRun
 		return markdown, true, nil
 	}
 
-	// 2b. Cycle complete — close ORCHESTRATE run, then start new cycle.
+	if nextResp.PendingCount > 0 {
+		return formatDevLoopWaitMarkdown(nextResp.PendingCount, active.CycleCount), false, nil
+	}
+
+	// 3. Cycle queue drained — close ORCHESTRATE run, then start a new cycle.
 	// CRITICAL: ORCHESTRATE completion must succeed before starting a new cycle,
 	// because DB enforces one RUNNING run per entity (ix_runs_one_running_per_entity).
 	// The process has recurrence_pattern set, so complete-execution.ts will NOT mark
@@ -163,7 +208,7 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, active *ActiveRun
 		Outputs: &api.ExecutionOutputs{
 			Structured: map[string]interface{}{
 				"tasks_executed": active.TaskCount,
-				"cycle_number":  active.CycleCount,
+				"cycle_number":   active.CycleCount,
 			},
 		},
 	}
@@ -172,12 +217,13 @@ func advanceDevLoop(ctx *auth.Context, cfg *config.RepoConfig, active *ActiveRun
 	}
 
 	// Start new cycle
-	state, _, err := startDevLoopCycle(ctx, cfg, active.SessionID)
+	state, markdown, err := startDevLoopCycle(ctx, cfg, active.SessionID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new cycle: %w", err)
 	}
-	// Regenerate markdown with correct cycle count
-	markdown := formatKindshipTaskMarkdown(cfg.AgentSlug, state.Task, state.RunID, state.ExecutionMode, state)
+	if state == nil {
+		return markdown, false, nil
+	}
 	return markdown, true, nil
 }
 

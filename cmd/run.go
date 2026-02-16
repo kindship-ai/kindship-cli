@@ -482,6 +482,7 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 	tasksExecuted := 0
 	var lastError error
 	interrupted := false
+	childOutcomes := make(map[string]api.ExecutionAttemptStatus)
 	const initialBackoff = 1 * time.Second
 	const maxBackoff = 30 * time.Second
 	backoff := initialBackoff
@@ -530,8 +531,8 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 				}
 				continue
 			}
-			// pending_count == 0 — all children done
-			log.Info("All children completed", map[string]interface{}{
+			// pending_count == 0 — queue drained (success/failure outcomes captured separately)
+			log.Info("Scoped child queue drained", map[string]interface{}{
 				"tasks_executed": tasksExecuted,
 			})
 			break
@@ -562,36 +563,44 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 				})
 				continue
 			}
-			// Fail-fast: child failure stops orchestration
-			log.Error("Child task failed, stopping orchestration (fail-fast)", err, map[string]interface{}{
+			// Retry-aware behavior: keep polling until queue drains.
+			log.Error("Child task execution returned error; continuing orchestration loop", err, map[string]interface{}{
 				"task_id": nextResp.Task.ID,
 			})
-			lastError = err
-			break
+			childOutcomes[nextResp.Task.ID] = api.ExecutionAttemptStatusFailed
+			continue
 		}
 
 		if !success {
 			// Child execution returned failure (non-zero exit)
-			failMsg := fmt.Sprintf("child task %s failed", nextResp.Task.ID)
-			log.Error("Child task execution failed, stopping orchestration (fail-fast)", nil, map[string]interface{}{
+			log.Error("Child task execution failed; continuing orchestration loop", nil, map[string]interface{}{
 				"task_id": nextResp.Task.ID,
 			})
-			lastError = fmt.Errorf(failMsg)
-			break
+			childOutcomes[nextResp.Task.ID] = api.ExecutionAttemptStatusFailed
+			continue
 		}
 
+		childOutcomes[nextResp.Task.ID] = api.ExecutionAttemptStatusSuccess
 		tasksExecuted++
 	}
 
 complete:
+
+	terminalChildFailures := make([]string, 0)
+	for entityID, outcome := range childOutcomes {
+		if outcome == api.ExecutionAttemptStatusFailed {
+			terminalChildFailures = append(terminalChildFailures, entityID)
+		}
+	}
 
 	// Complete the orchestration run
 	completeReq := api.ExecutionCompleteRequest{
 		Status: api.ExecutionAttemptStatusSuccess,
 		Outputs: &api.ExecutionOutputs{
 			Metrics: map[string]interface{}{
-				"tasks_executed": tasksExecuted,
-				"interrupted":    interrupted,
+				"tasks_executed":          tasksExecuted,
+				"interrupted":             interrupted,
+				"terminal_child_failures": len(terminalChildFailures),
 			},
 		},
 	}
@@ -604,6 +613,10 @@ complete:
 		completeReq.Status = api.ExecutionAttemptStatusFailed
 		errorMsg := lastError.Error()
 		completeReq.FailureReason = &errorMsg
+	} else if len(terminalChildFailures) > 0 {
+		completeReq.Status = api.ExecutionAttemptStatusFailed
+		errorMsg := fmt.Sprintf("%d child task(s) ended in FAILED state", len(terminalChildFailures))
+		completeReq.FailureReason = &errorMsg
 	}
 
 	_, err := client.CompleteExecution(runID, completeReq, serviceKey)
@@ -613,10 +626,11 @@ complete:
 	}
 
 	log.Info("Orchestration completed", map[string]interface{}{
-		"run_id":         runID,
-		"status":         completeReq.Status,
-		"tasks_executed": tasksExecuted,
-		"interrupted":    interrupted,
+		"run_id":                  runID,
+		"status":                  completeReq.Status,
+		"tasks_executed":          tasksExecuted,
+		"interrupted":             interrupted,
+		"terminal_child_failures": len(terminalChildFailures),
 	})
 
 	if interrupted {
@@ -625,6 +639,10 @@ complete:
 
 	if lastError != nil {
 		return fmt.Errorf("orchestration completed with errors: %w", lastError)
+	}
+
+	if len(terminalChildFailures) > 0 {
+		return fmt.Errorf("orchestration completed with %d terminal child failure(s)", len(terminalChildFailures))
 	}
 
 	return nil

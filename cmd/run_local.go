@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
 	"github.com/kindship-ai/kindship-cli/internal/auth"
@@ -88,7 +89,10 @@ func runLocalNext(cmd *cobra.Command, args []string) error {
 	if repoCfg.ProcessID != "" {
 		if active != nil && active.IsProcessLoop() {
 			// Resume existing process task.
-			_, markdown, err := startDevLoopTask(ctx, repoCfg, active.ProcessRunID, active.ProcessTasks, active.TaskIndex, "")
+			if active.Task == nil {
+				return fmt.Errorf("active process run has no task payload")
+			}
+			_, markdown, err := startDevLoopTask(ctx, repoCfg, active.ProcessRunID, active.ProcessTasks, *active.Task, "")
 			if err != nil {
 				return fmt.Errorf("resume dev loop task: %w", err)
 			}
@@ -161,7 +165,11 @@ func runLocalComplete(cmd *cobra.Command, args []string) error {
 		if shouldBlock {
 			fmt.Print(markdown)
 		} else {
-			fmt.Println("Dev loop cycle completed.")
+			if strings.TrimSpace(markdown) != "" {
+				fmt.Println(markdown)
+			} else {
+				fmt.Println("Dev loop cycle completed.")
+			}
 		}
 		return nil
 	}

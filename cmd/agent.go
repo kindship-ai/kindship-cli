@@ -33,7 +33,7 @@ var loopCmd = &cobra.Command{
 	Long: `Continuously polls for runnable tasks and executes them.
 
 Runs inside agent containers. Automatically:
-- Recovers RUNNING runs on startup (resumes ORCHESTRATE, fails leaf runs)
+- Reconciles RUNNING runs on startup (resumes server-returned work descriptors)
 - Polls for next task at configurable interval
 - Dispatches execution by mode (LLM, Bash, Python, etc.)
 - Sleeps when no tasks are available
@@ -115,6 +115,7 @@ func runLoop(cmd *cobra.Command, args []string) error {
 	} else {
 		log.Info("Run recovery complete", map[string]interface{}{
 			"resumed_count":    len(recoverResp.ResumedRuns),
+			"resumable_count":  len(recoverResp.ResumableRuns),
 			"failed_count":     recoverResp.FailedCount,
 			"skipped_ask_user": recoverResp.SkippedAskUser,
 		})
@@ -139,6 +140,52 @@ func runLoop(cmd *cobra.Command, args []string) error {
 					}
 				}(resumed.EntityID, runID)
 			}
+		}
+
+		// Resume leaf runs returned by reconciliation (non-destructive startup).
+		for _, resumable := range recoverResp.ResumableRuns {
+			if resumable.ExecutionMode == string(api.ExecutionModeOrchestrate) {
+				continue
+			}
+			if resumable.ExecutionMode == "ASK_USER" ||
+				resumable.ExecutionMode == "CHOICE" ||
+				resumable.ExecutionMode == "CALL_TO_ACTION" {
+				continue
+			}
+
+			runID := resumable.RunID
+			if _, loaded := activeResumes.LoadOrStore(runID, true); loaded {
+				log.Info("Resume already active, skipping", map[string]interface{}{
+					"run_id": runID,
+				})
+				continue
+			}
+
+			go func(entityID, runID, executionMode string) {
+				defer activeResumes.Delete(runID)
+				success, resumeErr := executeEntity(EntityExecutionParams{
+					EntityID:   entityID,
+					AgentID:    agentID,
+					ServiceKey: serviceKey,
+					Client:     client,
+					Log:        log,
+				})
+				if resumeErr != nil {
+					log.Error("Failed to resume leaf run", resumeErr, map[string]interface{}{
+						"entity_id":      entityID,
+						"run_id":         runID,
+						"execution_mode": executionMode,
+					})
+					return
+				}
+
+				log.Info("Leaf run resumed", map[string]interface{}{
+					"entity_id":      entityID,
+					"run_id":         runID,
+					"execution_mode": executionMode,
+					"success":        success,
+				})
+			}(resumable.EntityID, runID, resumable.ExecutionMode)
 		}
 	}
 
@@ -244,4 +291,3 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 		return false
 	}
 }
-

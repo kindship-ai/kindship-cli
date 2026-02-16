@@ -474,6 +474,66 @@ func (c *Client) FetchNextTaskScoped(agentID, parentEntityID, serviceKey string)
 	return &nextResp, nil
 }
 
+// FetchNextTaskScopedWithBearer fetches the next runnable task scoped to a parent entity
+// using bearer auth (local mode).
+func (c *Client) FetchNextTaskScopedWithBearer(agentID, parentEntityID, bearerToken string) (*PlanNextResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/plan/next", c.baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	q := u.Query()
+	q.Set("agent_id", agentID)
+	q.Set("mode", "orchestrate")
+	q.Set("entity_uuid", parentEntityID)
+	u.RawQuery = q.Encode()
+
+	c.log("Fetching next scoped task (bearer) for entity: %s", parentEntityID)
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp PlanNextResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
+		}
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var nextResp PlanNextResponse
+	if err := json.Unmarshal(body, &nextResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if nextResp.Task != nil {
+		c.log("Next scoped task (bearer): %s (%s)", nextResp.Task.Title, nextResp.Task.ID)
+	} else if nextResp.PendingCount > 0 {
+		c.log("No runnable scoped task yet; %d pending", nextResp.PendingCount)
+	} else {
+		c.log("No scoped tasks pending")
+	}
+
+	return &nextResp, nil
+}
+
 // FetchNextTaskForProcess fetches the next runnable task scoped to a specific Process.
 // Deprecated: Use FetchNextTaskScoped instead. This is a backward-compatible wrapper.
 func (c *Client) FetchNextTaskForProcess(agentID, processEntityID, serviceKey string) (*PlanNextResponse, error) {
@@ -533,9 +593,9 @@ func (c *Client) ActivateEntity(entityID, serviceKey string, recursive bool) (*A
 	return &activateResp, nil
 }
 
-// RecoverRuns classifies and recovers RUNNING runs after container restart.
-// ORCHESTRATE runs are returned for resumption, leaf runs are marked FAILED,
-// ASK_USER runs are skipped.
+// RecoverRuns reconciles RUNNING runs after container restart.
+// ORCHESTRATE runs are returned as resumed runs, leaf runs may be returned as
+// resumable descriptors, and ASK_USER runs are skipped.
 func (c *Client) RecoverRuns(agentID, serviceKey string) (*RecoverRunsResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/agent/recover-runs", c.baseURL)
 	c.log("Recovering runs for agent: %s", agentID)
@@ -583,8 +643,11 @@ func (c *Client) RecoverRuns(agentID, serviceKey string) (*RecoverRunsResponse, 
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	c.log("Recovered runs: %d resumed, %d failed, %d skipped (ASK_USER)",
-		len(recoverResp.ResumedRuns), recoverResp.FailedCount, recoverResp.SkippedAskUser)
+	c.log("Run reconciliation: %d resumed, %d resumable, %d failed, %d skipped (ASK_USER)",
+		len(recoverResp.ResumedRuns),
+		len(recoverResp.ResumableRuns),
+		recoverResp.FailedCount,
+		recoverResp.SkippedAskUser)
 	return &recoverResp, nil
 }
 

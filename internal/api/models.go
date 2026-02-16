@@ -218,7 +218,7 @@ type CreateDevLoopResponse struct {
 	Error     string        `json:"error,omitempty"`
 }
 
-// ResumedRun represents a run that should be resumed after container restart
+// ResumedRun represents a run descriptor returned by recover-runs.
 type ResumedRun struct {
 	RunID         string `json:"run_id"`
 	EntityID      string `json:"entity_id"`
@@ -228,10 +228,13 @@ type ResumedRun struct {
 
 // RecoverRunsResponse is the response from the recover-runs endpoint
 type RecoverRunsResponse struct {
-	ResumedRuns    []ResumedRun `json:"resumed_runs"`
-	FailedCount    int          `json:"failed_count"`
-	SkippedAskUser int          `json:"skipped_ask_user"`
-	Error          string       `json:"error,omitempty"`
+	ResumedRuns   []ResumedRun `json:"resumed_runs"`
+	ResumableRuns []ResumedRun `json:"resumable_runs,omitempty"`
+	// FailedCount is retained for backward compatibility.
+	// In reconciliation-first mode this is expected to remain 0.
+	FailedCount    int    `json:"failed_count"`
+	SkippedAskUser int    `json:"skipped_ask_user"`
+	Error          string `json:"error,omitempty"`
 }
 
 // ActiveRunResponse is the response from the active-run endpoint

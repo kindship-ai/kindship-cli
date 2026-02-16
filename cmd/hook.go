@@ -86,21 +86,25 @@ func runHookStart(cmd *cobra.Command, args []string) error {
 	if repoConfig.ProcessID != "" {
 		if active != nil && active.IsProcessLoop() {
 			// Resume existing process task via idempotent execution/start.
-			_, markdown, err := startDevLoopTask(ctx, repoConfig, active.ProcessRunID, active.ProcessTasks, active.TaskIndex, sessionID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: resume failed, starting fresh: %v\n", err)
+			if active.Task == nil {
+				fmt.Fprintln(os.Stderr, "Warning: active process run has no task payload, starting fresh cycle.")
 			} else {
-				fmt.Print(markdown)
-				if active.IsProcessLoop() {
-					writeSessionEvent(repoRoot, map[string]interface{}{
-						"event": "task_started",
-						"task":  active.TaskTitle,
-						"cycle": active.CycleCount,
-						"step":  active.TaskIndex + 1,
-						"total": active.TaskCount,
-					})
+				_, markdown, err := startDevLoopTask(ctx, repoConfig, active.ProcessRunID, active.ProcessTasks, *active.Task, sessionID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: resume failed, starting fresh: %v\n", err)
+				} else {
+					fmt.Print(markdown)
+					if active.IsProcessLoop() {
+						writeSessionEvent(repoRoot, map[string]interface{}{
+							"event": "task_started",
+							"task":  active.TaskTitle,
+							"cycle": active.CycleCount,
+							"step":  active.TaskIndex + 1,
+							"total": active.TaskCount,
+						})
+					}
+					return nil
 				}
-				return nil
 			}
 		}
 		// No active process run or resume failed — start fresh cycle.
