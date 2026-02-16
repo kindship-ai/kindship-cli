@@ -137,11 +137,12 @@ func runExecute(cmd *cobra.Command, args []string) error {
 // EntityExecutionParams holds parameters for executing an entity.
 // Used by both `kindship run <id>` and the agent loop.
 type EntityExecutionParams struct {
-	EntityID   string
-	AgentID    string
-	ServiceKey string
-	Client     *api.Client
-	Log        *logging.Logger
+	EntityID    string
+	AgentID     string
+	ServiceKey  string
+	Client      *api.Client
+	Log         *logging.Logger
+	ParentRunID string // ORCHESTRATE run ID (empty for top-level runs)
 }
 
 // executeEntity runs the full execution lifecycle for a single entity.
@@ -226,6 +227,7 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		EntityID:      params.EntityID,
 		ExecutionMode: entityResp.Entity.ExecutionMode,
 		AgentID:       params.AgentID,
+		ParentRun:     params.ParentRunID,
 	}
 	startResp, err := params.Client.StartExecution(startExecReq, params.ServiceKey)
 	if err != nil {
@@ -544,11 +546,12 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 		})
 
 		success, err := executeEntity(EntityExecutionParams{
-			EntityID:   nextResp.Task.ID,
-			AgentID:    agentID,
-			ServiceKey: serviceKey,
-			Client:     client,
-			Log:        log,
+			EntityID:    nextResp.Task.ID,
+			AgentID:     agentID,
+			ServiceKey:  serviceKey,
+			Client:      client,
+			Log:         log,
+			ParentRunID: runID,
 		})
 
 		if err != nil {

@@ -104,6 +104,7 @@ type ExecutionStartRequest struct {
 	AgentID             string        `json:"agent_id"`
 	OrchestrationMethod string        `json:"orchestration_method,omitempty"`
 	SessionID           string        `json:"session_id,omitempty"`
+	ParentRun           string        `json:"parent_run,omitempty"`
 }
 
 // ExecutionStartResponse represents the response from starting an execution

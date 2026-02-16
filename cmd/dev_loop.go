@@ -85,12 +85,17 @@ func startDevLoopTask(ctx *auth.Context, cfg *config.RepoConfig, processRunID st
 	task := tasks[index]
 	client := api.NewClient(ctx.APIBaseURL, verbose)
 
+	if processRunID == "" {
+		fmt.Println("⚠ processRunID is empty — parent_run will not be set on this task run")
+	}
+
 	// Start execution on this task (idempotent — returns existing RUNNING run)
 	startReq := api.ExecutionStartRequest{
 		EntityID:      task.ID,
 		ExecutionMode: api.ExecutionMode(task.ExecutionMode),
 		AgentID:       cfg.AgentID,
 		SessionID:     sessionID,
+		ParentRun:     processRunID,
 	}
 	startResp, err := client.StartExecutionWithBearer(startReq, ctx.Token)
 	if err != nil {
