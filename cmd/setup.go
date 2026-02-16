@@ -109,8 +109,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 		// Process already exists — call API to trigger blueprint update propagation (WS4)
 		fmt.Printf("Repository linked to agent: %s (checking for blueprint updates)\n", existingConfig.AgentID)
-		resp, _ := createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
-		fmt.Println("✓ Blueprint sync complete")
+		resp, syncErr := createDevLoopProcess(upgradeCtx, existingConfig.AgentID, repoName)
+		if syncErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Blueprint sync failed: %v\n", syncErr)
+		} else {
+			fmt.Println("✓ Blueprint sync complete")
+		}
 		if resp != nil {
 			installAttachmentSkill(upgradeCtx, existingConfig.AgentID, resp.Tasks, repoName)
 		}
