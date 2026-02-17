@@ -82,12 +82,15 @@ func init() {
 
 // PlanSubmitRequest is the request body for plan submission
 type PlanSubmitRequest struct {
-	AgentID       string     `json:"agent_id"`
-	Title         string     `json:"title"`
-	Description   string     `json:"description"`
-	Tasks         []TaskSpec `json:"tasks"`
-	Type          string     `json:"type,omitempty"`
-	SkipBootstrap bool       `json:"skip_bootstrap,omitempty"`
+	AgentID           string     `json:"agent_id"`
+	Title             string     `json:"title"`
+	Description       string     `json:"description"`
+	Tasks             []TaskSpec `json:"tasks"`
+	Type              string     `json:"type,omitempty"`
+	SkipBootstrap     bool       `json:"skip_bootstrap,omitempty"`
+	Status            string     `json:"status,omitempty"`
+	RecurrencePattern string     `json:"recurrence_pattern,omitempty"`
+	Tags              []string   `json:"tags,omitempty"`
 }
 
 // TaskSpec represents a task in the plan
@@ -153,11 +156,14 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 
 	// Parse the plan
 	var plan struct {
-		Title         string     `json:"title"`
-		Description   string     `json:"description"`
-		Tasks         []TaskSpec `json:"tasks"`
-		Type          string     `json:"type,omitempty"`
-		SkipBootstrap bool       `json:"skip_bootstrap,omitempty"`
+		Title             string     `json:"title"`
+		Description       string     `json:"description"`
+		Tasks             []TaskSpec `json:"tasks"`
+		Type              string     `json:"type,omitempty"`
+		SkipBootstrap     bool       `json:"skip_bootstrap,omitempty"`
+		Status            string     `json:"status,omitempty"`
+		RecurrencePattern string     `json:"recurrence_pattern,omitempty"`
+		Tags              []string   `json:"tags,omitempty"`
 	}
 
 	if err := json.Unmarshal(planData, &plan); err != nil {
@@ -166,12 +172,15 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 
 	// Build request
 	reqBody := PlanSubmitRequest{
-		AgentID:       agentID,
-		Title:         plan.Title,
-		Description:   plan.Description,
-		Tasks:         plan.Tasks,
-		Type:          plan.Type,
-		SkipBootstrap: plan.SkipBootstrap,
+		AgentID:           agentID,
+		Title:             plan.Title,
+		Description:       plan.Description,
+		Tasks:             plan.Tasks,
+		Type:              plan.Type,
+		SkipBootstrap:     plan.SkipBootstrap,
+		Status:            plan.Status,
+		RecurrencePattern: plan.RecurrencePattern,
+		Tags:              plan.Tags,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
