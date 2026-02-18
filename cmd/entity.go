@@ -74,5 +74,13 @@ func init() {
 	activateCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 
 	entityCmd.AddCommand(activateCmd)
+	entityCmd.AddCommand(entityGetCmd)
+	entityCmd.AddCommand(entityListCmd)
+	entityCmd.AddCommand(entityCreateCmd)
+	entityCmd.AddCommand(entityUpdateCmd)
+	entityCmd.AddCommand(entityDeleteCmd)
+	entityCmd.AddCommand(entityRestoreCmd)
+	entityCmd.AddCommand(entityDepsCmd)
+	entityCmd.AddCommand(entityMoveCmd)
 	rootCmd.AddCommand(entityCmd)
 }

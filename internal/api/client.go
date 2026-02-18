@@ -8,8 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kindship-ai/kindship-cli/internal/auth"
 )
 
 // Client is the Kindship API client for fetching secrets
@@ -1009,4 +1012,391 @@ func (c *Client) ListAttachmentsWithBearer(entityID, bearerToken string) ([]Enti
 
 	c.log("Listed %d attachments", len(result.Attachments))
 	return result.Attachments, nil
+}
+
+// GetEntity retrieves a single planning entity by ID with optional includes.
+func (c *Client) GetEntity(ctx *auth.Context, entityID string, include []string) (*EntityGetResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/entity/%s", c.baseURL, entityID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	if len(include) > 0 {
+		q := u.Query()
+		q.Set("include", strings.Join(include, ","))
+		u.RawQuery = q.Encode()
+	}
+
+	c.log("Getting entity: %s (include=%v)", entityID, include)
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var getResp EntityGetResponse
+	if err := json.Unmarshal(body, &getResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Got entity: %s (%s)", getResp.Entity.Title, getResp.Entity.Type)
+	return &getResp, nil
+}
+
+// ListEntities retrieves a filtered list of planning entities.
+func (c *Client) ListEntities(ctx *auth.Context, opts ListEntitiesOpts) (*EntityListResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/entity", c.baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	q := u.Query()
+	if opts.AgentID != "" {
+		q.Set("agent_id", opts.AgentID)
+	}
+	if opts.Type != "" {
+		q.Set("type", opts.Type)
+	}
+	if opts.Status != "" {
+		q.Set("status", opts.Status)
+	}
+	if opts.ParentID != "" {
+		q.Set("parent_id", opts.ParentID)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.IncludeDeleted {
+		q.Set("include_deleted", "true")
+	}
+	u.RawQuery = q.Encode()
+
+	c.log("Listing entities: %s", u.String())
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var listResp EntityListResponse
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Listed %d entities", listResp.Count)
+	return &listResp, nil
+}
+
+// CreateEntity creates a new planning entity.
+func (c *Client) CreateEntity(ctx *auth.Context, createReq EntityCreateRequest) (*EntityCreateResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/entity", c.baseURL)
+	c.log("Creating entity: %s (%s)", createReq.Title, createReq.Type)
+
+	jsonData, err := json.Marshal(createReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var createResp EntityCreateResponse
+	if err := json.Unmarshal(body, &createResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Created entity: %s (%s)", createResp.Entity.ID, createResp.Entity.Title)
+	return &createResp, nil
+}
+
+// UpdateEntity updates an existing planning entity.
+func (c *Client) UpdateEntity(ctx *auth.Context, entityID string, updateReq EntityUpdateRequest) (*EntityUpdateResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/entity/%s", c.baseURL, entityID)
+	c.log("Updating entity: %s", entityID)
+
+	jsonData, err := json.Marshal(updateReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var updateResp EntityUpdateResponse
+	if err := json.Unmarshal(body, &updateResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Updated entity: %s", updateResp.Entity.Title)
+	return &updateResp, nil
+}
+
+// DeleteEntity soft-deletes a planning entity.
+func (c *Client) DeleteEntity(ctx *auth.Context, entityID string, force bool) (*EntityDeleteResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/entity/%s", c.baseURL, entityID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	if force {
+		q := u.Query()
+		q.Set("force", "true")
+		u.RawQuery = q.Encode()
+	}
+
+	c.log("Deleting entity: %s (force=%v)", entityID, force)
+
+	req, err := http.NewRequest(http.MethodDelete, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var deleteResp EntityDeleteResponse
+	if err := json.Unmarshal(body, &deleteResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Deleted entity: %s", entityID)
+	return &deleteResp, nil
+}
+
+// RestoreEntity restores a soft-deleted planning entity.
+func (c *Client) RestoreEntity(ctx *auth.Context, entityID string) (*EntityRestoreResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/entity/%s/restore", c.baseURL, entityID)
+	c.log("Restoring entity: %s", entityID)
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var restoreResp EntityRestoreResponse
+	if err := json.Unmarshal(body, &restoreResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Restored entity: %s", restoreResp.Entity.Title)
+	return &restoreResp, nil
+}
+
+// ManageDeps manages dependencies on a planning entity (add, remove, or check).
+func (c *Client) ManageDeps(ctx *auth.Context, entityID, op, depID string) (*EntityDepsResponse, error) {
+	u, err := url.Parse(fmt.Sprintf("%s/api/cli/entity/%s/deps", c.baseURL, entityID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	q := u.Query()
+	q.Set("op", op)
+	u.RawQuery = q.Encode()
+
+	c.log("Managing deps on entity %s: op=%s dep=%s", entityID, op, depID)
+
+	var reqBody io.Reader
+	if depID != "" {
+		jsonData, err := json.Marshal(EntityDepsRequest{DependencyID: depID})
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
+		reqBody = bytes.NewBuffer(jsonData)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, u.String(), reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+	if depID != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var depsResp EntityDepsResponse
+	if err := json.Unmarshal(body, &depsResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Deps %s: success=%v", op, depsResp.Success)
+	return &depsResp, nil
+}
+
+// MoveEntity moves an entity to a new parent and/or sequence position.
+func (c *Client) MoveEntity(ctx *auth.Context, entityID string, moveReq EntityMoveRequest) (*EntityMoveResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/entity/%s/move", c.baseURL, entityID)
+	c.log("Moving entity %s to parent %s", entityID, moveReq.ParentID)
+
+	jsonData, err := json.Marshal(moveReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var moveResp EntityMoveResponse
+	if err := json.Unmarshal(body, &moveResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Moved entity: %s", moveResp.Entity.Title)
+	return &moveResp, nil
 }
