@@ -51,7 +51,7 @@ const (
 type SuccessCriteria struct {
 	Description        string                 `json:"description"`
 	MeasurableOutcomes []string               `json:"measurable_outcomes"`
-	ValidationRules    map[string]interface{} `json:"validation_rules"`
+	ValidationRules    map[string]interface{} `json:"validation_rules,omitempty"`
 }
 
 // PlanningEntity represents a planning entity from the API
