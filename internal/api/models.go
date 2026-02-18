@@ -300,3 +300,33 @@ type PlanExportMetadata struct {
 	ObjectiveID string   `json:"objective_id"`
 	AgentID     string   `json:"agent_id"`
 }
+
+// ExportNode represents a single entity in the recursive export tree
+type ExportNode struct {
+	ID                  string                 `json:"id,omitempty"`
+	Type                string                 `json:"type"`
+	Title               string                 `json:"title"`
+	Description         string                 `json:"description,omitempty"`
+	Status              string                 `json:"status"`
+	SequenceOrder       *int                   `json:"sequence_order,omitempty"`
+	ExecutionMode       string                 `json:"execution_mode,omitempty"`
+	Code                string                 `json:"code,omitempty"`
+	RecurrencePattern   string                 `json:"recurrence_pattern,omitempty"`
+	Tags                []string               `json:"tags,omitempty"`
+	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
+	SuccessCriteria     map[string]interface{} `json:"success_criteria,omitempty"`
+	DependenciesLabeled map[string]interface{} `json:"dependencies_labeled,omitempty"`
+	InputSchema         map[string]interface{} `json:"input_schema,omitempty"`
+	OutputSchema        map[string]interface{} `json:"output_schema,omitempty"`
+	Children            []ExportNode           `json:"children"`
+	Metadata            *RecursiveExportMeta   `json:"_metadata,omitempty"`
+	Error               string                 `json:"error,omitempty"`
+}
+
+// RecursiveExportMeta contains summary info for the export tree root
+type RecursiveExportMeta struct {
+	EntityID      string `json:"entity_id"`
+	AgentID       string `json:"agent_id"`
+	TotalEntities int    `json:"total_entities"`
+	Depth         int    `json:"depth"`
+}
