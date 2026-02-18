@@ -22,7 +22,8 @@ var planCmd = &cobra.Command{
 
 Subcommands:
   submit   Submit a plan from file or stdin
-  next     Get the next executable task`,
+  next     Get the next executable task
+  export   Export a project or process as submittable JSON`,
 }
 
 var planSubmitCmd = &cobra.Command{
@@ -48,6 +49,23 @@ Examples:
 	RunE: runPlanSubmit,
 }
 
+var planExportCmd = &cobra.Command{
+	Use:   "export <entity-id>",
+	Short: "Export a project or process as submittable JSON",
+	Long: `Export a PROJECT or PROCESS entity and its child TASKs
+in the same JSON format accepted by 'plan submit'.
+
+This enables round-trip verification: export -> submit -> export -> diff.
+
+Examples:
+  kindship plan export <entity-id>
+  kindship plan export <entity-id> --include-ids
+  kindship plan export <entity-id> --output plan.json
+  kindship plan export <entity-id> --format text`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPlanExport,
+}
+
 var planNextCmd = &cobra.Command{
 	Use:   "next",
 	Short: "Get next executable task",
@@ -68,15 +86,22 @@ Examples:
 }
 
 var (
-	planFormat string
+	planFormat     string
+	exportIncludeIDs bool
+	exportOutput     string
 )
 
 func init() {
 	planSubmitCmd.Flags().StringVar(&planFormat, "format", "text", "Output format (json, text)")
 	planNextCmd.Flags().StringVar(&planFormat, "format", "json", "Output format (json, text)")
 
+	planExportCmd.Flags().StringVar(&planFormat, "format", "json", "Output format (json, text)")
+	planExportCmd.Flags().BoolVar(&exportIncludeIDs, "include-ids", false, "Include _metadata block with entity UUIDs")
+	planExportCmd.Flags().StringVar(&exportOutput, "output", "", "Write output to file instead of stdout")
+
 	planCmd.AddCommand(planSubmitCmd)
 	planCmd.AddCommand(planNextCmd)
+	planCmd.AddCommand(planExportCmd)
 	rootCmd.AddCommand(planCmd)
 }
 
@@ -85,7 +110,7 @@ type PlanSubmitRequest struct {
 	AgentID           string     `json:"agent_id"`
 	Title             string     `json:"title"`
 	Description       string     `json:"description"`
-	Tasks             []TaskSpec `json:"tasks"`
+	Tasks             []api.TaskSpec `json:"tasks"`
 	Type              string     `json:"type,omitempty"`
 	SkipBootstrap     bool       `json:"skip_bootstrap,omitempty"`
 	Status            string     `json:"status,omitempty"`
@@ -93,19 +118,6 @@ type PlanSubmitRequest struct {
 	Tags              []string   `json:"tags,omitempty"`
 }
 
-// TaskSpec represents a task in the plan
-type TaskSpec struct {
-	Title               string                 `json:"title"`
-	Description         string                 `json:"description,omitempty"`
-	SequenceOrder       int                    `json:"sequence_order,omitempty"`
-	ExecutionMode       string                 `json:"execution_mode,omitempty"`
-	Code                string                 `json:"code,omitempty"`
-	DependenciesLabeled map[string]string      `json:"dependencies_labeled,omitempty"`
-	InputSchema         map[string]interface{} `json:"input_schema,omitempty"`
-	OutputSchema        map[string]interface{} `json:"output_schema,omitempty"`
-	SuccessCriteria     *api.SuccessCriteria   `json:"success_criteria,omitempty"`
-	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
-}
 
 // PlanSubmitResponse is the response from plan submission
 type PlanSubmitResponse struct {
@@ -158,7 +170,7 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 	var plan struct {
 		Title             string     `json:"title"`
 		Description       string     `json:"description"`
-		Tasks             []TaskSpec `json:"tasks"`
+		Tasks             []api.TaskSpec `json:"tasks"`
 		Type              string     `json:"type,omitempty"`
 		SkipBootstrap     bool       `json:"skip_bootstrap,omitempty"`
 		Status            string     `json:"status,omitempty"`
@@ -309,5 +321,94 @@ func runPlanNext(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  Execution mode: %s\n", nextResp.Task.ExecutionMode)
 
+	return nil
+}
+
+func runPlanExport(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	entityID := args[0]
+
+	// Build request URL
+	endpoint := fmt.Sprintf("%s/api/cli/plan/export?entity_id=%s", ctx.APIBaseURL, entityID)
+	if exportIncludeIDs {
+		endpoint += "&include_ids=true"
+	}
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to export plan: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp api.PlanExportResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("export failed: %s", errResp.Error)
+		}
+		return fmt.Errorf("export failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var exportResp api.PlanExportResponse
+	if err := json.Unmarshal(body, &exportResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if planFormat == "text" {
+		fmt.Printf("Title: %s\n", exportResp.Title)
+		fmt.Printf("Type: %s\n", exportResp.Type)
+		if exportResp.Status != "" {
+			fmt.Printf("Status: %s\n", exportResp.Status)
+		}
+		if exportResp.RecurrencePattern != "" {
+			fmt.Printf("Recurrence: %s\n", exportResp.RecurrencePattern)
+		}
+		if exportResp.Description != "" {
+			fmt.Printf("Description: %s\n", exportResp.Description)
+		}
+		fmt.Printf("Tasks: %d\n", len(exportResp.Tasks))
+		for i, task := range exportResp.Tasks {
+			mode := task.ExecutionMode
+			if mode == "" {
+				mode = "default"
+			}
+			fmt.Printf("  [%d] %s (%s)\n", i+1, task.Title, mode)
+		}
+		return nil
+	}
+
+	// JSON output — pretty-print
+	prettyJSON, err := json.MarshalIndent(exportResp, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to format JSON: %w", err)
+	}
+
+	// Write to file or stdout
+	if exportOutput != "" {
+		if err := os.WriteFile(exportOutput, prettyJSON, 0644); err != nil {
+			return fmt.Errorf("failed to write to %s: %w", exportOutput, err)
+		}
+		fmt.Printf("Exported to %s\n", exportOutput)
+		return nil
+	}
+
+	fmt.Println(string(prettyJSON))
 	return nil
 }

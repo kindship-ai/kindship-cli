@@ -72,8 +72,13 @@ type PlanningEntity struct {
 	ParentID            *string                `json:"parent_id"`
 	Rationale           *string                `json:"rationale"`
 	AccountID           string                 `json:"account_id"`
+	AgentID             string                 `json:"agent_id"`
 	Code                *string                `json:"code"`
 	Boundaries          map[string]interface{} `json:"boundaries"`
+	Version             int                    `json:"version"`
+	Tags                []string               `json:"tags"`
+	ActivatedAt         *time.Time             `json:"activated_at"`
+	DeletedAt           *time.Time             `json:"deleted_at"`
 	CreatedAt           time.Time              `json:"created_at"`
 	UpdatedAt           time.Time              `json:"updated_at"`
 }
@@ -259,4 +264,39 @@ type ActiveRunData struct {
 	ProcessTasks  []TaskInfo             `json:"process_tasks"`
 	Inputs        map[string]interface{} `json:"inputs"`
 	CycleCount    int                    `json:"cycle_count"`
+}
+
+// TaskSpec represents a task in a plan (used by both submit and export)
+type TaskSpec struct {
+	Title               string                 `json:"title"`
+	Description         string                 `json:"description,omitempty"`
+	SequenceOrder       int                    `json:"sequence_order,omitempty"`
+	ExecutionMode       string                 `json:"execution_mode,omitempty"`
+	Code                string                 `json:"code,omitempty"`
+	DependenciesLabeled map[string]string      `json:"dependencies_labeled,omitempty"`
+	InputSchema         map[string]interface{} `json:"input_schema,omitempty"`
+	OutputSchema        map[string]interface{} `json:"output_schema,omitempty"`
+	SuccessCriteria     *SuccessCriteria       `json:"success_criteria,omitempty"`
+	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
+}
+
+// PlanExportResponse is the response from plan/export
+type PlanExportResponse struct {
+	Title             string              `json:"title"`
+	Description       string              `json:"description"`
+	Type              string              `json:"type"`
+	Status            string              `json:"status,omitempty"`
+	RecurrencePattern string              `json:"recurrence_pattern,omitempty"`
+	Tags              []string            `json:"tags,omitempty"`
+	Tasks             []TaskSpec          `json:"tasks"`
+	Metadata          *PlanExportMetadata `json:"_metadata,omitempty"`
+	Error             string              `json:"error,omitempty"`
+}
+
+// PlanExportMetadata contains entity IDs for round-trip verification
+type PlanExportMetadata struct {
+	EntityID    string   `json:"entity_id"`
+	TaskIDs     []string `json:"task_ids"`
+	ObjectiveID string   `json:"objective_id"`
+	AgentID     string   `json:"agent_id"`
 }
