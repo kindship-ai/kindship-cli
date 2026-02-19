@@ -280,34 +280,14 @@ type TaskSpec struct {
 	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
 }
 
-// PlanExportResponse is the response from plan/export
-type PlanExportResponse struct {
-	Title             string              `json:"title"`
-	Description       string              `json:"description"`
-	Type              string              `json:"type"`
-	Status            string              `json:"status,omitempty"`
-	RecurrencePattern string              `json:"recurrence_pattern,omitempty"`
-	Tags              []string            `json:"tags,omitempty"`
-	Tasks             []TaskSpec          `json:"tasks"`
-	Metadata          *PlanExportMetadata `json:"_metadata,omitempty"`
-	Error             string              `json:"error,omitempty"`
-}
-
-// PlanExportMetadata contains entity IDs for round-trip verification
-type PlanExportMetadata struct {
-	EntityID    string   `json:"entity_id"`
-	TaskIDs     []string `json:"task_ids"`
-	ObjectiveID string   `json:"objective_id"`
-	AgentID     string   `json:"agent_id"`
-}
-
-// ExportNode represents a single entity in the recursive export tree
-type ExportNode struct {
-	ID                  string                 `json:"id,omitempty"`
+// ExportEntity represents a single entity in the flat export array
+type ExportEntity struct {
+	ID                  string                 `json:"id"`
 	Type                string                 `json:"type"`
 	Title               string                 `json:"title"`
-	Description         string                 `json:"description,omitempty"`
+	ParentID            *string                `json:"parent_id"`
 	Status              string                 `json:"status"`
+	Description         string                 `json:"description,omitempty"`
 	SequenceOrder       *int                   `json:"sequence_order,omitempty"`
 	ExecutionMode       string                 `json:"execution_mode,omitempty"`
 	Code                string                 `json:"code,omitempty"`
@@ -318,15 +298,38 @@ type ExportNode struct {
 	DependenciesLabeled map[string]interface{} `json:"dependencies_labeled,omitempty"`
 	InputSchema         map[string]interface{} `json:"input_schema,omitempty"`
 	OutputSchema        map[string]interface{} `json:"output_schema,omitempty"`
-	Children            []ExportNode           `json:"children"`
-	Metadata            *RecursiveExportMeta   `json:"_metadata,omitempty"`
-	Error               string                 `json:"error,omitempty"`
 }
 
-// RecursiveExportMeta contains summary info for the export tree root
-type RecursiveExportMeta struct {
-	EntityID      string `json:"entity_id"`
+// ExportResponse is the response from plan/export (flat array format)
+type ExportResponse struct {
+	Entities []ExportEntity  `json:"entities"`
+	Metadata *ExportMetadata `json:"_metadata,omitempty"`
+	Error    string          `json:"error,omitempty"`
+}
+
+// ExportMetadata contains summary info for the export
+type ExportMetadata struct {
+	RootID        string `json:"root_id"`
 	AgentID       string `json:"agent_id"`
 	TotalEntities int    `json:"total_entities"`
 	Depth         int    `json:"depth"`
+	ExportedAt    string `json:"exported_at"`
+}
+
+// ImportResponse is the response from plan/import
+type ImportResponse struct {
+	Success          bool           `json:"success"`
+	CreatedCount     int            `json:"created_count"`
+	UpdatedCount     int            `json:"updated_count"`
+	Entities         []ImportResult `json:"entities"`
+	ObjectiveID      string         `json:"objective_id"`
+	PrimeDirectiveID string         `json:"prime_directive_id"`
+	Error            string         `json:"error,omitempty"`
+}
+
+// ImportResult represents the outcome of a single entity import
+type ImportResult struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Action string `json:"action"` // "created" or "updated"
 }

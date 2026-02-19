@@ -24,7 +24,8 @@ var planCmd = &cobra.Command{
 Subcommands:
   submit   Submit a plan from file or stdin
   next     Get the next executable task
-  export   Export a planning entity as JSON`,
+  export   Export a planning entity as JSON
+  import   Import entities from an export file`,
 }
 
 var planSubmitCmd = &cobra.Command{
@@ -53,21 +54,16 @@ Examples:
 var planExportCmd = &cobra.Command{
 	Use:   "export <entity-id>",
 	Short: "Export a planning entity as JSON",
-	Long: `Export a planning entity in JSON format.
+	Long: `Export a planning entity and its descendants as JSON.
 
-By default, exports a PROJECT or PROCESS with flat child TASKs
-in the same JSON format accepted by 'plan submit'.
-
-With --recursive, exports any entity type and its full descendant
-tree as nested JSON with 'children' arrays.
+The output is a flat array of entities with UUID references,
+suitable for round-trip import via 'plan import'.
 
 Examples:
   kindship plan export <entity-id>
-  kindship plan export <entity-id> --include-ids
-  kindship plan export <entity-id> --output plan.json
   kindship plan export <entity-id> --format text
-  kindship plan export <entity-id> --recursive --format text
-  kindship plan export <entity-id> --recursive --include-deleted`,
+  kindship plan export <entity-id> --output plan.json
+  kindship plan export <entity-id> --include-deleted`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPlanExport,
 }
@@ -91,12 +87,28 @@ Examples:
 	RunE: runPlanNext,
 }
 
+var planImportCmd = &cobra.Command{
+	Use:   "import [file]",
+	Short: "Import entities from an export file",
+	Long: `Import planning entities from a JSON file or stdin.
+
+The JSON format matches the output of 'plan export'.
+Entities with existing UUIDs are updated; new UUIDs are created.
+
+If no file is provided, reads from stdin.
+
+Examples:
+  kindship plan import plan.json
+  kindship plan export <id> | kindship plan import
+  cat plan.json | kindship plan import`,
+	RunE: runPlanImport,
+}
+
 var (
 	planFormat           string
-	exportIncludeIDs     bool
 	exportOutput         string
-	exportRecursive      bool
 	exportIncludeDeleted bool
+	importFormat         string
 )
 
 func init() {
@@ -104,14 +116,15 @@ func init() {
 	planNextCmd.Flags().StringVar(&planFormat, "format", "json", "Output format (json, text)")
 
 	planExportCmd.Flags().StringVar(&planFormat, "format", "json", "Output format (json, text)")
-	planExportCmd.Flags().BoolVar(&exportIncludeIDs, "include-ids", false, "Include _metadata block with entity UUIDs")
 	planExportCmd.Flags().StringVar(&exportOutput, "output", "", "Write output to file instead of stdout")
-	planExportCmd.Flags().BoolVar(&exportRecursive, "recursive", false, "Recursively export full entity tree")
-	planExportCmd.Flags().BoolVar(&exportIncludeDeleted, "include-deleted", false, "Include DELETED entities (recursive only)")
+	planExportCmd.Flags().BoolVar(&exportIncludeDeleted, "include-deleted", false, "Include DELETED entities")
+
+	planImportCmd.Flags().StringVar(&importFormat, "format", "text", "Output format (json, text)")
 
 	planCmd.AddCommand(planSubmitCmd)
 	planCmd.AddCommand(planNextCmd)
 	planCmd.AddCommand(planExportCmd)
+	planCmd.AddCommand(planImportCmd)
 	rootCmd.AddCommand(planCmd)
 }
 
@@ -343,14 +356,8 @@ func runPlanExport(cmd *cobra.Command, args []string) error {
 
 	// Build request URL
 	endpoint := fmt.Sprintf("%s/api/cli/plan/export?entity_id=%s", ctx.APIBaseURL, entityID)
-	if exportIncludeIDs {
-		endpoint += "&include_ids=true"
-	}
-	if exportRecursive {
-		endpoint += "&recursive=true"
-		if exportIncludeDeleted {
-			endpoint += "&include_deleted=true"
-		}
+	if exportIncludeDeleted {
+		endpoint += "&include_deleted=true"
 	}
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
@@ -374,7 +381,6 @@ func runPlanExport(cmd *cobra.Command, args []string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// Try to extract error message from response
 		var errObj struct {
 			Error string `json:"error,omitempty"`
 		}
@@ -384,66 +390,17 @@ func runPlanExport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("export failed (%d): %s", resp.StatusCode, string(body))
 	}
 
-	// Recursive mode: parse as ExportNode
-	if exportRecursive {
-		var treeResp api.ExportNode
-		if err := json.Unmarshal(body, &treeResp); err != nil {
-			return fmt.Errorf("failed to parse recursive response: %w", err)
-		}
-
-		if treeResp.Error != "" {
-			return fmt.Errorf("export failed: %s", treeResp.Error)
-		}
-
-		if planFormat == "text" {
-			renderTreeText(&treeResp, 0)
-			return nil
-		}
-
-		// JSON output — pretty-print
-		prettyJSON, err := json.MarshalIndent(treeResp, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to format JSON: %w", err)
-		}
-
-		if exportOutput != "" {
-			if err := os.WriteFile(exportOutput, prettyJSON, 0644); err != nil {
-				return fmt.Errorf("failed to write to %s: %w", exportOutput, err)
-			}
-			fmt.Printf("Exported to %s\n", exportOutput)
-			return nil
-		}
-
-		fmt.Println(string(prettyJSON))
-		return nil
-	}
-
-	// Flat mode: parse as PlanExportResponse (unchanged)
-	var exportResp api.PlanExportResponse
+	var exportResp api.ExportResponse
 	if err := json.Unmarshal(body, &exportResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	if exportResp.Error != "" {
+		return fmt.Errorf("export failed: %s", exportResp.Error)
+	}
+
 	if planFormat == "text" {
-		fmt.Printf("Title: %s\n", exportResp.Title)
-		fmt.Printf("Type: %s\n", exportResp.Type)
-		if exportResp.Status != "" {
-			fmt.Printf("Status: %s\n", exportResp.Status)
-		}
-		if exportResp.RecurrencePattern != "" {
-			fmt.Printf("Recurrence: %s\n", exportResp.RecurrencePattern)
-		}
-		if exportResp.Description != "" {
-			fmt.Printf("Description: %s\n", exportResp.Description)
-		}
-		fmt.Printf("Tasks: %d\n", len(exportResp.Tasks))
-		for i, task := range exportResp.Tasks {
-			mode := task.ExecutionMode
-			if mode == "" {
-				mode = "default"
-			}
-			fmt.Printf("  [%d] %s (%s)\n", i+1, task.Title, mode)
-		}
+		renderFlatAsTree(exportResp.Entities)
 		return nil
 	}
 
@@ -453,7 +410,6 @@ func runPlanExport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to format JSON: %w", err)
 	}
 
-	// Write to file or stdout
 	if exportOutput != "" {
 		if err := os.WriteFile(exportOutput, prettyJSON, 0644); err != nil {
 			return fmt.Errorf("failed to write to %s: %w", exportOutput, err)
@@ -466,39 +422,163 @@ func runPlanExport(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// renderTreeText renders a recursive export node as an indented text tree.
-func renderTreeText(node *api.ExportNode, indent int) {
+func runPlanImport(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	// Read JSON from file or stdin
+	var importData []byte
+
+	if len(args) > 0 {
+		importData, err = os.ReadFile(args[0])
+		if err != nil {
+			return fmt.Errorf("failed to read import file: %w", err)
+		}
+	} else {
+		importData, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("failed to read from stdin: %w", err)
+		}
+	}
+
+	if len(importData) == 0 {
+		return fmt.Errorf("no import data provided")
+	}
+
+	// Parse as ExportResponse to extract entities
+	var exportResp api.ExportResponse
+	if err := json.Unmarshal(importData, &exportResp); err != nil {
+		return fmt.Errorf("failed to parse import data: %w", err)
+	}
+
+	if len(exportResp.Entities) == 0 {
+		return fmt.Errorf("no entities found in import data")
+	}
+
+	// Build import request: { agent_id, entities }
+	importReq := struct {
+		AgentID  string             `json:"agent_id"`
+		Entities []api.ExportEntity `json:"entities"`
+	}{
+		AgentID:  agentID,
+		Entities: exportResp.Entities,
+	}
+
+	jsonData, err := json.Marshal(importReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal import request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/plan/import", ctx.APIBaseURL)
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to import plan: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp api.ImportResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("import failed: %s", errResp.Error)
+		}
+		return fmt.Errorf("import failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var importResp api.ImportResponse
+	if err := json.Unmarshal(body, &importResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if importFormat == "json" {
+		return printJSON(importResp)
+	}
+
+	// Human-readable output
+	fmt.Printf("✓ Imported %d entities (%d created, %d updated)\n",
+		len(importResp.Entities), importResp.CreatedCount, importResp.UpdatedCount)
+	for _, e := range importResp.Entities {
+		fmt.Printf("  [%s] %s (%s)\n", e.Action, e.Title, e.ID)
+	}
+
+	return nil
+}
+
+// renderFlatAsTree reconstructs a tree from the flat entity array and renders it as indented text.
+func renderFlatAsTree(entities []api.ExportEntity) {
+	if len(entities) == 0 {
+		fmt.Println("(empty)")
+		return
+	}
+
+	// Build parent→children index map
+	childrenMap := map[string][]int{} // parentID -> entity indices
+	var rootIdx int
+
+	for i := range entities {
+		if entities[i].ParentID == nil {
+			rootIdx = i
+		} else {
+			pid := *entities[i].ParentID
+			childrenMap[pid] = append(childrenMap[pid], i)
+		}
+	}
+
+	renderEntityText(&entities[rootIdx], entities, childrenMap, 0)
+}
+
+func renderEntityText(entity *api.ExportEntity, all []api.ExportEntity, childrenMap map[string][]int, indent int) {
 	prefix := strings.Repeat("  ", indent)
 
+	childIndices := childrenMap[entity.ID]
+
 	// Build the line: TYPE: Title [STATUS]
-	line := fmt.Sprintf("%s%s: %s", prefix, node.Type, node.Title)
+	line := fmt.Sprintf("%s%s: %s", prefix, entity.Type, entity.Title)
 
 	// Add execution mode for leaf nodes (no children)
-	if len(node.Children) == 0 && node.ExecutionMode != "" {
-		line += fmt.Sprintf(" (%s)", node.ExecutionMode)
+	if len(childIndices) == 0 && entity.ExecutionMode != "" {
+		line += fmt.Sprintf(" (%s)", entity.ExecutionMode)
 	}
 
 	// Add child count for nodes with children
-	if len(node.Children) > 0 {
-		line += fmt.Sprintf(" (%d children)", len(node.Children))
+	if len(childIndices) > 0 {
+		line += fmt.Sprintf(" (%d children)", len(childIndices))
 	}
 
 	// Add recurrence for PROCESS nodes
-	if node.RecurrencePattern != "" {
-		line += fmt.Sprintf(" (%s)", node.RecurrencePattern)
+	if entity.RecurrencePattern != "" {
+		line += fmt.Sprintf(" (%s)", entity.RecurrencePattern)
 	}
 
-	line += fmt.Sprintf(" [%s]", node.Status)
-
-	// Add ID if present
-	if node.ID != "" {
-		line += fmt.Sprintf(" {%s}", node.ID)
-	}
+	line += fmt.Sprintf(" [%s]", entity.Status)
+	line += fmt.Sprintf(" {%s}", entity.ID)
 
 	fmt.Println(line)
 
 	// Recurse into children
-	for i := range node.Children {
-		renderTreeText(&node.Children[i], indent+1)
+	for _, childIdx := range childIndices {
+		renderEntityText(&all[childIdx], all, childrenMap, indent+1)
 	}
 }
