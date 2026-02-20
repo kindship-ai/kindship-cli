@@ -48,6 +48,35 @@ kindship status --local
 
 `local-complete` and `local-fail` accept optional `--outputs` JSON matching `api.ExecutionOutputs`.
 
+### Plan Management
+
+```bash
+# Submit a plan (creates PROJECT + TASKs)
+kindship plan submit plan.json
+
+# Export an entity tree as flat JSON
+kindship plan export <entity-id>
+kindship plan export <entity-id> --output plan.json
+kindship plan export <entity-id> --include-deleted
+
+# Import entities (upsert: existing UUIDs updated, new UUIDs created)
+kindship plan import plan.json
+kindship plan export <id> | kindship plan import   # round-trip pipe
+
+# Get next executable task
+kindship plan next
+```
+
+### Entity CRUD
+
+```bash
+kindship entity list
+kindship entity list --type TASK --status ACTIVE
+kindship entity create --type TASK --title "My Task" --parent <parent-id>
+kindship entity update <id> --status ACTIVE
+kindship entity delete <id>
+```
+
 ## Agent Containers (Service Key Mode)
 
 The original `kindship auth` flow is for Kindship agent containers. It fetches secrets from the Kindship API and injects them as environment variables into a subprocess.
@@ -135,13 +164,15 @@ kindship-cli/
 │   ├── hook.go            # Claude Code hook handlers (local dev loop)
 │   ├── setup.go           # Repo binding + Claude Code integration setup
 │   ├── status.go          # Status + local run status
-│   ├── plan.go            # Plan submit/next (local)
+│   ├── plan.go            # Plan submit/export/import/next (local)
+│   ├── entity.go          # Entity CRUD commands (local)
 │   ├── login.go           # OAuth login (local)
 │   ├── agent.go           # 'kindship agent' command
 │   └── update.go          # 'kindship update' command
 ├── internal/
 │   ├── api/
-│   │   └── client.go      # API client for fetching secrets and plan data
+│   │   ├── client.go      # API client for fetching secrets and plan data
+│   │   └── models.go      # Request/response types for all API endpoints
 │   └── logging/
 │       └── axiom.go       # Axiom structured logging
 ├── go.mod
