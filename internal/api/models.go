@@ -15,6 +15,7 @@ const (
 	ExecutionModeOrchestrate   ExecutionMode = "ORCHESTRATE"
 	ExecutionModeChoice        ExecutionMode = "CHOICE"
 	ExecutionModeCallToAction  ExecutionMode = "CALL_TO_ACTION"
+	ExecutionModeAgent         ExecutionMode = "AGENT"
 )
 
 // ExecutionAttemptStatus represents the status of an execution attempt

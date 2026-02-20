@@ -1357,6 +1357,56 @@ func (c *Client) ManageDeps(ctx *auth.Context, entityID, op, depID string) (*Ent
 	return &depsResp, nil
 }
 
+// APIError represents a non-2xx HTTP response from the Kindship API.
+// It carries the status code and raw body so callers can inspect the failure.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error (%d): %s", e.StatusCode, e.Body)
+}
+
+// FetchSystemPrompt retrieves the system prompt for an agent from the API.
+func (c *Client) FetchSystemPrompt(agentID, serviceKey string) (string, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/agent/system-prompt?agent_id=%s", c.baseURL, agentID)
+	c.log("Fetching system prompt for agent: %s", agentID)
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", &APIError{StatusCode: resp.StatusCode, Body: string(body)}
+	}
+
+	var result struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return result.Prompt, nil
+}
+
 // MoveEntity moves an entity to a new parent and/or sequence position.
 func (c *Client) MoveEntity(ctx *auth.Context, entityID string, moveReq EntityMoveRequest) (*EntityMoveResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/entity/%s/move", c.baseURL, entityID)

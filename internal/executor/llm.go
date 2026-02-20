@@ -24,7 +24,7 @@ func ExecuteLLM(entity *api.PlanningEntity, inputs map[string]interface{}) *Exec
 	prompt := buildPrompt(entity, inputs)
 
 	// Execute Claude Code via kindship auth which injects credentials from the API
-	cmd := exec.Command("kindship", "auth", "claude", "-p", prompt)
+	cmd := exec.Command("kindship", "auth", "claude", "--dangerously-skip-permissions", "-p", prompt)
 	cmd.Dir = "/workspace"
 
 	var stdout, stderr bytes.Buffer

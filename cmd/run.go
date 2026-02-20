@@ -273,6 +273,8 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	case api.ExecutionModeHybrid:
 		// HYBRID uses LLM with entity context + code as reference
 		result = executor.ExecuteLLM(&entityResp.Entity, startResp.Inputs)
+	case api.ExecutionModeAgent:
+		result = executor.ExecuteAgent(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey)
 	default:
 		log.Error("Unknown execution mode", nil, map[string]interface{}{
 			"mode": entityResp.Entity.ExecutionMode,
