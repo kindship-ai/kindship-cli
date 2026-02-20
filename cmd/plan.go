@@ -520,7 +520,11 @@ func runPlanImport(cmd *cobra.Command, args []string) error {
 	fmt.Printf("✓ Imported %d entities (%d created, %d updated)\n",
 		len(importResp.Entities), importResp.CreatedCount, importResp.UpdatedCount)
 	for _, e := range importResp.Entities {
-		fmt.Printf("  [%s] %s (%s)\n", e.Action, e.Title, e.ID)
+		if e.Action == "skipped" && e.Error != "" {
+			fmt.Printf("  [%s] %s (%s) — %s\n", e.Action, e.Title, e.ID, e.Error)
+		} else {
+			fmt.Printf("  [%s] %s (%s)\n", e.Action, e.Title, e.ID)
+		}
 	}
 
 	return nil

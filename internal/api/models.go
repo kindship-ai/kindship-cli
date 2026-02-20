@@ -330,7 +330,9 @@ type ImportResponse struct {
 
 // ImportResult represents the outcome of a single entity import
 type ImportResult struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Action string `json:"action"` // "created" or "updated"
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Action    string `json:"action"`              // "created", "updated", or "skipped"
+	Error     string `json:"error,omitempty"`      // reason if skipped
+	ErrorCode string `json:"error_code,omitempty"` // PostgreSQL error code if skipped
 }
