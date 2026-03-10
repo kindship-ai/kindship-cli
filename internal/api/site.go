@@ -33,8 +33,10 @@ type SiteBuildStep struct {
 
 // SiteCreateResponse is the response from POST /api/cli/site/create
 type SiteCreateResponse struct {
-	Site  *SiteInfo `json:"site,omitempty"`
-	Error string    `json:"error,omitempty"`
+	Site                  *SiteInfo `json:"site,omitempty"`
+	WorkspaceDir          string    `json:"workspace_dir,omitempty"`
+	WorkspaceBootstrapped bool      `json:"workspace_bootstrapped"`
+	Error                 string    `json:"error,omitempty"`
 }
 
 // SiteListResponse is the response from GET /api/cli/site/list
@@ -55,6 +57,7 @@ type SitePushResponse struct {
 	CommitSha       string   `json:"commit_sha"`
 	FilesPushed     int      `json:"files_pushed"`
 	Message         string   `json:"message"`
+	SourceDir       string   `json:"source_dir,omitempty"`
 	SkippedReserved []string `json:"skipped_reserved"`
 	SkippedDenied   []string `json:"skipped_denied"`
 	Error           string   `json:"error,omitempty"`
@@ -91,4 +94,3 @@ type SiteDomainRemoveResponse struct {
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
-

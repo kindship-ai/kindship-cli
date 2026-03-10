@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -71,16 +72,17 @@ Examples:
 }
 
 var sitePushCmd = &cobra.Command{
-	Use:   "push",
-	Short: "Upload project files to a site",
-	Long: `Tar and upload project files to a site.
+	Use:   "push <name>",
+	Short: "Publish a local site workspace",
+	Long: `Publish a local site workspace to a Kindship hosted site.
 
 Automatically excludes .git/, node_modules/, .env*, *.pem, *.key,
 and .woodpecker.yml. Enforces max 50MB compressed and 1000 files.
 
 Examples:
-  kindship site push --dir . --message "Initial deploy"
-  kindship site push --dir ./dist`,
+  kindship site push my-app
+  kindship site push my-app --message "Initial deploy"
+  kindship site push my-app --dir ./my-app`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSitePush,
 }
@@ -200,6 +202,8 @@ var (
 	logsBuild   int
 )
 
+const containerSiteWorkspaceRoot = "/workspace/sites"
+
 func init() {
 	siteCreateCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteListCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
@@ -208,7 +212,7 @@ func init() {
 	siteDeleteCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 
 	sitePushCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
-	sitePushCmd.Flags().StringVar(&pushDir, "dir", ".", "Directory to upload")
+	sitePushCmd.Flags().StringVar(&pushDir, "dir", "", "Directory to upload (defaults to the canonical site workspace)")
 	sitePushCmd.Flags().StringVar(&pushMessage, "message", "Deploy from agent", "Commit message")
 
 	siteLogsCmd.Flags().IntVar(&logsBuild, "build", 0, "Build number (default: latest)")
@@ -238,6 +242,229 @@ func init() {
 	siteCmd.AddCommand(siteDomainCmd)
 	rootCmd.AddCommand(siteCmd)
 }
+
+func defaultSiteWorkspaceDir(ctx *auth.Context, siteName string) (string, error) {
+	if strings.TrimSpace(siteName) == "" || strings.ContainsAny(siteName, `/\`) || siteName == "." || siteName == ".." {
+		return "", fmt.Errorf("invalid site name for workspace path: %q", siteName)
+	}
+
+	if override := strings.TrimSpace(os.Getenv("KINDSHIP_SITE_WORKSPACE_ROOT")); override != "" {
+		root, err := filepath.Abs(override)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve KINDSHIP_SITE_WORKSPACE_ROOT: %w", err)
+		}
+		return filepath.Join(root, siteName), nil
+	}
+
+	if ctx.IsContainerMode() {
+		return filepath.Join(containerSiteWorkspaceRoot, siteName), nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to determine home directory: %w", err)
+	}
+
+	return filepath.Join(homeDir, "kindship", "sites", siteName), nil
+}
+
+func resolveSiteWorkspaceDir(ctx *auth.Context, siteName, explicitDir string) (string, error) {
+	if strings.TrimSpace(explicitDir) == "" {
+		return defaultSiteWorkspaceDir(ctx, siteName)
+	}
+
+	return filepath.Abs(explicitDir)
+}
+
+func localSiteGitIdentity(ctx *auth.Context, siteName string) (string, string) {
+	name := "Kindship Site Agent"
+
+	switch {
+	case ctx.IsContainerMode() && ctx.AgentID != "":
+		return name, fmt.Sprintf("agent-%s@kindship.ai", ctx.AgentID)
+	case ctx.UserEmail != "":
+		return name, ctx.UserEmail
+	default:
+		return name, fmt.Sprintf("site-%s@kindship.ai", siteName)
+	}
+}
+
+func runGit(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func ensureLocalSiteWorkspace(ctx *auth.Context, siteName, dir string) (bool, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, fmt.Errorf("failed to create site workspace: %w", err)
+	}
+
+	hadUserFiles, err := workspaceHasUserFiles(dir)
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect site workspace: %w", err)
+	}
+
+	bootstrapped := false
+	gitDir := filepath.Join(dir, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		if !os.IsNotExist(err) {
+			return false, fmt.Errorf("failed to inspect site workspace: %w", err)
+		}
+
+		if err := runGit("", "init", dir); err != nil {
+			return false, fmt.Errorf("failed to initialize local site repo: %w", err)
+		}
+		bootstrapped = true
+	}
+
+	name, email := localSiteGitIdentity(ctx, siteName)
+	if err := runGit(dir, "config", "user.name", name); err != nil {
+		return false, fmt.Errorf("failed to configure git user.name: %w", err)
+	}
+	if err := runGit(dir, "config", "user.email", email); err != nil {
+		return false, fmt.Errorf("failed to configure git user.email: %w", err)
+	}
+
+	wroteGitignore, err := writeFileIfAbsent(filepath.Join(dir, ".gitignore"), []byte(defaultSiteGitignore), 0o644)
+	if err != nil {
+		return false, fmt.Errorf("failed to write .gitignore: %w", err)
+	}
+	if wroteGitignore {
+		bootstrapped = true
+	}
+	wroteReadme, err := writeFileIfAbsent(filepath.Join(dir, "README.md"), []byte(defaultSiteReadme(siteName, dir)), 0o644)
+	if err != nil {
+		return false, fmt.Errorf("failed to write README.md: %w", err)
+	}
+	if wroteReadme {
+		bootstrapped = true
+	}
+	if !hadUserFiles {
+		wroteStarter, err := writeFileIfAbsent(filepath.Join(dir, "index.html"), []byte(defaultSiteIndexHTML(siteName)), 0o644)
+		if err != nil {
+			return false, fmt.Errorf("failed to write starter index.html: %w", err)
+		}
+		if wroteStarter {
+			bootstrapped = true
+		}
+	}
+
+	return bootstrapped, nil
+}
+
+func requireLocalSiteWorkspaceRepo(dir string) error {
+	gitDir := filepath.Join(dir, ".git")
+	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+		return fmt.Errorf("site workspace %s is not a git repo; run 'kindship site create <name>' or initialize git there first", dir)
+	}
+
+	return nil
+}
+
+func workspaceHasUserFiles(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+
+	for _, entry := range entries {
+		switch entry.Name() {
+		case ".git", ".gitignore", "README.md":
+			continue
+		default:
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func writeFileIfAbsent(path string, contents []byte, mode os.FileMode) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+
+	if err := os.WriteFile(path, contents, mode); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func defaultSiteReadme(siteName, dir string) string {
+	return fmt.Sprintf("# %s\n\nLocal workspace for the Kindship hosted site `%s`.\n\n- Workspace: `%s`\n- Deploy: `kindship site push %s`\n\nDeployment uses the Kindship CLI upload path. Treat this local repository as the source of truth.\n", siteName, siteName, filepath.ToSlash(dir), siteName)
+}
+
+func defaultSiteIndexHTML(siteName string) string {
+	return fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>%s</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background: linear-gradient(135deg, #f5f7fb 0%%, #e7eef8 100%%);
+      color: #1f2937;
+    }
+    main {
+      width: min(40rem, calc(100%% - 3rem));
+      padding: 3rem;
+      border-radius: 1.5rem;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
+    }
+    h1 {
+      margin: 0 0 1rem;
+      font-size: clamp(2rem, 6vw, 3.5rem);
+      line-height: 1;
+    }
+    p {
+      margin: 0.75rem 0;
+      font-size: 1.05rem;
+      line-height: 1.6;
+    }
+    code {
+      padding: 0.15rem 0.4rem;
+      border-radius: 999px;
+      background: #e2e8f0;
+      font-size: 0.95em;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>%s</h1>
+    <p>Your Kindship site workspace is ready.</p>
+    <p>Edit this file or replace it with your app, then deploy with <code>kindship site push %s</code>.</p>
+  </main>
+</body>
+</html>
+`, siteName, siteName, siteName)
+}
+
+const defaultSiteGitignore = `.DS_Store
+.env
+.env.*
+.next/
+dist/
+build/
+node_modules/
+`
 
 func runSiteCreate(cmd *cobra.Command, args []string) error {
 	ctx, err := auth.GetAuthContext()
@@ -291,17 +518,38 @@ func runSiteCreate(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("failed to create site (%d): %s", resp.StatusCode, string(body))
 	}
+	if createResp.Site == nil {
+		return fmt.Errorf("site created but API response did not include site details")
+	}
+
+	site := createResp.Site
+	workspaceDir, err := defaultSiteWorkspaceDir(ctx, site.SiteName)
+	if err != nil {
+		return err
+	}
+	bootstrapped, err := ensureLocalSiteWorkspace(ctx, site.SiteName, workspaceDir)
+	if err != nil {
+		return fmt.Errorf("site %q created, but failed to bootstrap local workspace: %w", site.SiteName, err)
+	}
+
+	createResp.WorkspaceDir = workspaceDir
+	createResp.WorkspaceBootstrapped = bootstrapped
 
 	if siteFormat == "json" {
 		return printJSON(createResp)
 	}
 
-	site := createResp.Site
 	fmt.Printf("✓ Created site %q\n", site.SiteName)
 	fmt.Printf("  Domain:  %s\n", site.Domain)
 	fmt.Printf("  Status:  %s\n", site.Status)
+	fmt.Printf("  Local:   %s\n", workspaceDir)
 	if site.GiteaRepoURL != nil {
 		fmt.Printf("  Repo:    %s\n", *site.GiteaRepoURL)
+	}
+	if bootstrapped {
+		fmt.Printf("  Workspace bootstrapped\n")
+	} else {
+		fmt.Printf("  Workspace already present\n")
 	}
 
 	return nil
@@ -461,10 +709,19 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 
 	siteName := args[0]
 
-	// Resolve directory
-	dir, err := filepath.Abs(pushDir)
+	// Resolve site workspace
+	dir, err := resolveSiteWorkspaceDir(ctx, siteName, pushDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve directory: %w", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("site workspace not found at %s; run 'kindship site create %s' first or pass --dir", dir, siteName)
+		}
+		return fmt.Errorf("failed to access %s: %w", dir, err)
+	}
+	if err := requireLocalSiteWorkspaceRepo(dir); err != nil {
+		return err
 	}
 
 	// Create tar.gz archive in memory
@@ -528,6 +785,8 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("push failed (%d): %s", resp.StatusCode, string(body))
 	}
 
+	pushResp.SourceDir = dir
+
 	if siteFormat == "json" {
 		return printJSON(pushResp)
 	}
@@ -537,6 +796,7 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		sha = sha[:7]
 	}
 	fmt.Printf("✓ Pushed %d files (commit %s)\n", pushResp.FilesPushed, sha)
+	fmt.Printf("  Source:  %s\n", dir)
 	fmt.Println("  Build triggered")
 	if len(pushResp.SkippedReserved) > 0 {
 		fmt.Printf("  Skipped reserved: %s\n", strings.Join(pushResp.SkippedReserved, ", "))

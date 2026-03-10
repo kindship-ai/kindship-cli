@@ -77,6 +77,20 @@ kindship entity update <id> --status ACTIVE
 kindship entity delete <id>
 ```
 
+### Hosted Sites
+
+```bash
+kindship site create my-app
+kindship site push my-app
+kindship site status my-app
+```
+
+`kindship site create` now bootstraps a local site workspace repo for the agent. By default the workspace lives at:
+- container mode: `/workspace/sites/<site-name>`
+- local mode: `~/kindship/sites/<site-name>`
+
+`kindship site push <site-name>` deploys from that canonical workspace unless `--dir` is explicitly provided.
+
 ## Agent Containers (Service Key Mode)
 
 The original `kindship auth` flow is for Kindship agent containers. It fetches secrets from the Kindship API and injects them as environment variables into a subprocess.
