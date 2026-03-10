@@ -144,6 +144,27 @@ func (c *Context) RequireAgentID() (string, error) {
 	return c.AgentID, nil
 }
 
+// RequireAccountID returns the account ID for DNS/billing operations.
+// Prefers repo config's account_id (supports team accounts), falls back to
+// user ID (personal account where user ID = account ID). Container mode is not supported.
+func (c *Context) RequireAccountID() (string, error) {
+	if c.IsContainerMode() {
+		return "", fmt.Errorf("DNS credential management is not available in container mode")
+	}
+
+	// Prefer repo-level account ID (supports team accounts)
+	repoConfig, err := config.LoadRepoConfig()
+	if err == nil && repoConfig.AccountID != "" {
+		return repoConfig.AccountID, nil
+	}
+
+	// Fall back to user ID (personal account)
+	if c.UserID == "" {
+		return "", fmt.Errorf("no user ID: run 'kindship login' first")
+	}
+	return c.UserID, nil
+}
+
 // MaskedToken returns a masked version of the token for logging
 func (c *Context) MaskedToken() string {
 	if len(c.Token) < 8 {

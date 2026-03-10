@@ -11,6 +11,7 @@ type SiteInfo struct {
 	LastDeployAt     *string `json:"last_deploy_at"`
 	LastDeploySha    *string `json:"last_deploy_sha"`
 	LastError        *string `json:"last_error"`
+	CustomDomain     *string `json:"custom_domain"`
 	CreatedAt        string  `json:"created_at"`
 }
 
@@ -72,3 +73,22 @@ type SiteDeleteResponse struct {
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
+
+// SiteDomainResponse is the response from custom domain set/status endpoints
+type SiteDomainResponse struct {
+	CustomDomain      string `json:"custom_domain"`
+	Status            string `json:"status"`
+	SSLStatus         string `json:"ssl_status"`
+	CnameTarget       string `json:"cname_target"`
+	DnsAutoConfigured bool   `json:"dns_auto_configured"`
+	DnsProvider       string `json:"dns_provider,omitempty"`
+	DnsError          string `json:"dns_error,omitempty"`
+	Error             string `json:"error,omitempty"`
+}
+
+// SiteDomainRemoveResponse is the response from DELETE /api/cli/site/domain
+type SiteDomainRemoveResponse struct {
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+

@@ -31,7 +31,8 @@ Subcommands:
   status   Get site info and build status
   push     Upload project files
   logs     View build logs
-  delete   Delete a site`,
+  delete   Delete a site
+  domain   Manage custom domains`,
 }
 
 var siteCreateCmd = &cobra.Command{
@@ -108,6 +109,90 @@ Examples:
 	RunE: runSiteDelete,
 }
 
+var siteDomainCmd = &cobra.Command{
+	Use:   "domain",
+	Short: "Manage custom domains",
+	Long: `Commands for managing custom domains on sites.
+
+Subcommands:
+  set      Set a custom domain for a site
+  status   Check domain DNS/TLS status
+  remove   Remove a custom domain`,
+}
+
+var siteDomainSetCmd = &cobra.Command{
+	Use:   "set <site> <domain>",
+	Short: "Set a custom domain for a site",
+	Long: `Register a custom domain for a site via Cloudflare for SaaS.
+
+Only subdomains are supported (e.g., www.example.com, app.example.com).
+Apex/root domains (e.g., example.com) are not supported.
+
+Examples:
+  kindship site domain set my-app www.example.com
+  kindship site domain set my-app app.example.com`,
+	Args: cobra.ExactArgs(2),
+	RunE: runSiteDomainSet,
+}
+
+var siteDomainStatusCmd = &cobra.Command{
+	Use:   "status <site>",
+	Short: "Check domain DNS/TLS status",
+	Long: `Check the status of a custom domain's DNS and TLS certificate.
+
+Examples:
+  kindship site domain status my-app`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSiteDomainStatus,
+}
+
+var siteDomainRemoveCmd = &cobra.Command{
+	Use:   "remove <site>",
+	Short: "Remove a custom domain",
+	Long: `Remove the custom domain from a site. The site will still be accessible
+at its kindship.site subdomain. Triggers a redeploy to update routing.
+
+Examples:
+  kindship site domain remove my-app`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSiteDomainRemove,
+}
+
+var siteDomainCheckCmd = &cobra.Command{
+	Use:   "check <domain>",
+	Short: "Check domain availability and price",
+	Long: `Check if a domain is available for registration and get pricing info.
+
+Examples:
+  kindship site domain check example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSiteDomainCheck,
+}
+
+var siteDomainRegisterCmd = &cobra.Command{
+	Use:   "register <site> <domain>",
+	Short: "Register a new domain",
+	Long: `Register a new domain via Kindship (powered by DNSimple).
+The domain will be registered to Kindship with WHOIS privacy enabled.
+Payment is processed via Stripe.
+
+Examples:
+  kindship site domain register my-app example.com`,
+	Args: cobra.ExactArgs(2),
+	RunE: runSiteDomainRegister,
+}
+
+var siteDomainRegisterStatusCmd = &cobra.Command{
+	Use:   "register-status <site>",
+	Short: "Check domain registration status",
+	Long: `Check the registration status of a domain purchase.
+
+Examples:
+  kindship site domain register-status my-app`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSiteDomainRegisterStatus,
+}
+
 var (
 	siteFormat  string
 	pushDir     string
@@ -128,12 +213,29 @@ func init() {
 
 	siteLogsCmd.Flags().IntVar(&logsBuild, "build", 0, "Build number (default: latest)")
 
+	siteDomainCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	siteDomainSetCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	siteDomainStatusCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	siteDomainRemoveCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+
+	siteDomainCheckCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	siteDomainRegisterCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	siteDomainRegisterStatusCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+
+	siteDomainCmd.AddCommand(siteDomainSetCmd)
+	siteDomainCmd.AddCommand(siteDomainStatusCmd)
+	siteDomainCmd.AddCommand(siteDomainRemoveCmd)
+	siteDomainCmd.AddCommand(siteDomainCheckCmd)
+	siteDomainCmd.AddCommand(siteDomainRegisterCmd)
+	siteDomainCmd.AddCommand(siteDomainRegisterStatusCmd)
+
 	siteCmd.AddCommand(siteCreateCmd)
 	siteCmd.AddCommand(siteListCmd)
 	siteCmd.AddCommand(siteStatusCmd)
 	siteCmd.AddCommand(sitePushCmd)
 	siteCmd.AddCommand(siteLogsCmd)
 	siteCmd.AddCommand(siteDeleteCmd)
+	siteCmd.AddCommand(siteDomainCmd)
 	rootCmd.AddCommand(siteCmd)
 }
 
@@ -260,13 +362,17 @@ func runSiteList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Table header
-	fmt.Printf("%-16s %-32s %-10s %s\n", "NAME", "DOMAIN", "STATUS", "LAST DEPLOY")
+	fmt.Printf("%-16s %-32s %-10s %-24s %s\n", "NAME", "DOMAIN", "STATUS", "CUSTOM DOMAIN", "LAST DEPLOY")
 	for _, site := range listResp.Sites {
 		lastDeploy := "-"
 		if site.LastDeployAt != nil {
 			lastDeploy = formatRelativeTime(*site.LastDeployAt)
 		}
-		fmt.Printf("%-16s %-32s %-10s %s\n", site.SiteName, site.Domain, site.Status, lastDeploy)
+		customDomain := ""
+		if site.CustomDomain != nil {
+			customDomain = *site.CustomDomain
+		}
+		fmt.Printf("%-16s %-32s %-10s %-24s %s\n", site.SiteName, site.Domain, site.Status, customDomain, lastDeploy)
 	}
 
 	return nil
@@ -331,6 +437,9 @@ func runSiteStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Build:   #%d %s (%s)\n", b.Number, b.Status, age)
 	} else {
 		fmt.Printf("  Build:   none\n")
+	}
+	if site.CustomDomain != nil {
+		fmt.Printf("  Custom:  %s\n", *site.CustomDomain)
 	}
 	if site.LastError != nil {
 		fmt.Printf("  Error:   %s\n", *site.LastError)
@@ -565,6 +674,390 @@ func runSiteDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("✓ Deleted site %q\n", args[0])
+
+	return nil
+}
+
+func runSiteDomainSet(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	reqBody, err := json.Marshal(map[string]string{
+		"site_name": args[0],
+		"domain":    args[1],
+		"agent_id":  agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/site/domain", ctx.APIBaseURL)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to set custom domain: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var domainResp api.SiteDomainResponse
+	if err := json.Unmarshal(body, &domainResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if domainResp.Error != "" {
+			return fmt.Errorf("failed to set custom domain: %s", domainResp.Error)
+		}
+		return fmt.Errorf("failed to set custom domain (%d): %s", resp.StatusCode, string(body))
+	}
+
+	if siteFormat == "json" {
+		return printJSON(domainResp)
+	}
+
+	fmt.Printf("✓ Custom domain %s registered (status: %s)\n", domainResp.CustomDomain, domainResp.Status)
+
+	if domainResp.DnsAutoConfigured {
+		fmt.Printf("\n  ✓ CNAME record auto-created at %s\n", domainResp.DnsProvider)
+	} else {
+		if domainResp.DnsError != "" {
+			fmt.Printf("\n  ⚠ Auto-DNS failed: %s\n", domainResp.DnsError)
+		}
+		fmt.Println()
+		fmt.Println("  Add this DNS record:")
+		fmt.Printf("    CNAME  %s  →  %s\n", domainResp.CustomDomain, domainResp.CnameTarget)
+		fmt.Println()
+		fmt.Println("  Note: Apex domains (example.com) are not supported — use a subdomain (www).")
+	}
+	fmt.Println()
+	fmt.Printf("  Then check:  kindship site domain status %s\n", args[0])
+
+	return nil
+}
+
+func runSiteDomainStatus(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/site/domain?site_name=%s&agent_id=%s", ctx.APIBaseURL, args[0], agentID)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to get domain status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp api.SiteDomainResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("failed: %s", errResp.Error)
+		}
+		return fmt.Errorf("failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var domainResp api.SiteDomainResponse
+	if err := json.Unmarshal(body, &domainResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if siteFormat == "json" {
+		return printJSON(domainResp)
+	}
+
+	fmt.Printf("Domain: %s\n", domainResp.CustomDomain)
+	fmt.Printf("  Status:  %s\n", domainResp.Status)
+	fmt.Printf("  SSL:     %s\n", domainResp.SSLStatus)
+	fmt.Printf("  CNAME:   %s\n", domainResp.CnameTarget)
+
+	return nil
+}
+
+func runSiteDomainRemove(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	reqBody, err := json.Marshal(map[string]string{
+		"site_name": args[0],
+		"agent_id":  agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/site/domain", ctx.APIBaseURL)
+	req, err := http.NewRequest(http.MethodDelete, endpoint, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to remove custom domain: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var removeResp api.SiteDomainRemoveResponse
+	if err := json.Unmarshal(body, &removeResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if removeResp.Error != "" {
+			return fmt.Errorf("failed to remove custom domain: %s", removeResp.Error)
+		}
+		return fmt.Errorf("failed to remove custom domain (%d): %s", resp.StatusCode, string(body))
+	}
+
+	if siteFormat == "json" {
+		return printJSON(removeResp)
+	}
+
+	fmt.Printf("✓ Custom domain removed from %s\n", args[0])
+
+	return nil
+}
+
+func runSiteDomainCheck(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/site/domain/check?domain=%s", ctx.APIBaseURL, args[0])
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to check domain: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var checkResp api.DomainCheckResponse
+	if err := json.Unmarshal(body, &checkResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if checkResp.Error != "" {
+			return fmt.Errorf("failed: %s", checkResp.Error)
+		}
+		return fmt.Errorf("failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	if siteFormat == "json" {
+		return printJSON(checkResp)
+	}
+
+	fmt.Printf("Domain: %s\n", checkResp.Domain)
+	if checkResp.Available {
+		fmt.Println("  Status:  AVAILABLE")
+	} else {
+		fmt.Println("  Status:  NOT AVAILABLE")
+	}
+	if checkResp.Premium {
+		fmt.Println("  Type:    Premium")
+	}
+	if checkResp.Price != nil {
+		fmt.Printf("  Register: $%.2f %s\n", float64(checkResp.Price.RegistrationCents)/100, checkResp.Price.Currency)
+		fmt.Printf("  Renewal:  $%.2f %s/year\n", float64(checkResp.Price.RenewalCents)/100, checkResp.Price.Currency)
+	}
+
+	return nil
+}
+
+func runSiteDomainRegister(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	reqBody, err := json.Marshal(map[string]string{
+		"site_name": args[0],
+		"domain":    args[1],
+		"agent_id":  agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/site/domain/register", ctx.APIBaseURL)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to register domain: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var regResp api.DomainRegisterResponse
+	if err := json.Unmarshal(body, &regResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if regResp.Error != "" {
+			return fmt.Errorf("failed: %s", regResp.Error)
+		}
+		return fmt.Errorf("failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	if siteFormat == "json" {
+		return printJSON(regResp)
+	}
+
+	fmt.Printf("✓ Domain registration started: %s\n", regResp.Domain)
+	fmt.Printf("  Hostname:  %s\n", regResp.RequestedHostname)
+	fmt.Printf("  Price:     $%.2f\n", float64(regResp.PriceCents)/100)
+	fmt.Printf("  Status:    %s\n", regResp.Status)
+	if regResp.CheckoutURL != "" {
+		fmt.Printf("\n  Complete payment: %s\n", regResp.CheckoutURL)
+	}
+
+	return nil
+}
+
+func runSiteDomainRegisterStatus(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/site/domain/register?site_name=%s&agent_id=%s", ctx.APIBaseURL, args[0], agentID)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to get registration status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var regResp api.DomainRegisterResponse
+	if err := json.Unmarshal(body, &regResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if regResp.Error != "" {
+			return fmt.Errorf("failed: %s", regResp.Error)
+		}
+		return fmt.Errorf("failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	if siteFormat == "json" {
+		return printJSON(regResp)
+	}
+
+	fmt.Printf("Domain: %s\n", regResp.Domain)
+	fmt.Printf("  Hostname:  %s\n", regResp.RequestedHostname)
+	fmt.Printf("  Status:    %s\n", regResp.Status)
+	if regResp.LastError != "" {
+		fmt.Printf("  Error:     %s\n", regResp.LastError)
+	}
 
 	return nil
 }
