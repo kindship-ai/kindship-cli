@@ -1,0 +1,74 @@
+package api
+
+// SiteInfo represents a site returned from the API
+type SiteInfo struct {
+	ID               string  `json:"id"`
+	SiteName         string  `json:"site_name"`
+	Domain           string  `json:"domain"`
+	Status           string  `json:"status"`
+	GiteaRepoURL     *string `json:"gitea_repo_url"`
+	WoodpeckerRepoID *int    `json:"woodpecker_repo_id"`
+	LastDeployAt     *string `json:"last_deploy_at"`
+	LastDeploySha    *string `json:"last_deploy_sha"`
+	LastError        *string `json:"last_error"`
+	CreatedAt        string  `json:"created_at"`
+}
+
+// SiteBuild represents build info from the status endpoint
+type SiteBuild struct {
+	Number     int    `json:"number"`
+	Status     string `json:"status"`
+	Commit     string `json:"commit"`
+	StartedAt  int64  `json:"started_at"`
+	FinishedAt int64  `json:"finished_at"`
+}
+
+// SiteBuildStep represents a single step in build logs
+type SiteBuildStep struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Output string `json:"output"`
+}
+
+// SiteCreateResponse is the response from POST /api/cli/site/create
+type SiteCreateResponse struct {
+	Site  *SiteInfo `json:"site,omitempty"`
+	Error string    `json:"error,omitempty"`
+}
+
+// SiteListResponse is the response from GET /api/cli/site/list
+type SiteListResponse struct {
+	Sites []SiteInfo `json:"sites"`
+	Error string     `json:"error,omitempty"`
+}
+
+// SiteStatusResponse is the response from GET /api/cli/site/status
+type SiteStatusResponse struct {
+	Site  *SiteInfo  `json:"site,omitempty"`
+	Build *SiteBuild `json:"build"`
+	Error string     `json:"error,omitempty"`
+}
+
+// SitePushResponse is the response from POST /api/cli/site/push
+type SitePushResponse struct {
+	CommitSha       string   `json:"commit_sha"`
+	FilesPushed     int      `json:"files_pushed"`
+	Message         string   `json:"message"`
+	SkippedReserved []string `json:"skipped_reserved"`
+	SkippedDenied   []string `json:"skipped_denied"`
+	Error           string   `json:"error,omitempty"`
+}
+
+// SiteLogsResponse is the response from GET /api/cli/site/logs
+type SiteLogsResponse struct {
+	BuildNumber int             `json:"build_number"`
+	Status      string          `json:"status"`
+	Steps       []SiteBuildStep `json:"steps"`
+	Error       string          `json:"error,omitempty"`
+}
+
+// SiteDeleteResponse is the response from POST /api/cli/site/delete
+type SiteDeleteResponse struct {
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
