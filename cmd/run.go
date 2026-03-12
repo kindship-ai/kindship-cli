@@ -489,6 +489,12 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 	const maxBackoff = 30 * time.Second
 	backoff := initialBackoff
 
+	// Max cumulative time spent waiting with pending-but-no-runnable tasks
+	// before giving up. Prevents infinite polling when children are stuck
+	// (e.g., blocked deps that will never resolve, stale ASK_USER).
+	const maxIdleWait = 30 * time.Minute
+	idleStart := time.Time{}
+
 	for {
 		// Check context cancellation
 		select {
@@ -513,11 +519,28 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 		// No task available right now
 		if nextResp.Task == nil {
 			if nextResp.PendingCount > 0 {
+				// Track cumulative idle time to detect permanently stuck children
+				if idleStart.IsZero() {
+					idleStart = time.Now()
+				}
+				idleElapsed := time.Since(idleStart)
+				if idleElapsed >= maxIdleWait {
+					log.Error("Orchestration idle timeout — children pending but none runnable", nil, map[string]interface{}{
+						"pending_count":   nextResp.PendingCount,
+						"tasks_executed":  tasksExecuted,
+						"idle_elapsed_m":  int(idleElapsed.Minutes()),
+						"max_idle_wait_m": int(maxIdleWait.Minutes()),
+					})
+					lastError = fmt.Errorf("idle timeout: %d children pending but none runnable for %s", nextResp.PendingCount, idleElapsed.Truncate(time.Second))
+					break
+				}
+
 				// Tasks are pending (blocked deps, ASK_USER waiting, etc.) — backoff and retry
 				log.Info("No runnable tasks but children pending, waiting", map[string]interface{}{
 					"pending_count":  nextResp.PendingCount,
 					"tasks_executed": tasksExecuted,
 					"backoff_s":      int(backoff.Seconds()),
+					"idle_elapsed_m": int(idleElapsed.Minutes()),
 				})
 				select {
 				case <-ctx.Done():
@@ -539,8 +562,9 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 			})
 			break
 		}
-		// Reset backoff on successful task fetch
+		// Reset backoff and idle timer on successful task fetch
 		backoff = initialBackoff
+		idleStart = time.Time{}
 
 		// Execute task
 		log.Info("Executing task", map[string]interface{}{
