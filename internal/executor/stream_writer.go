@@ -25,22 +25,26 @@ type LogSender func(lines []api.LogLine) error
 type StreamWriter struct {
 	stream   string // "stdout" or "stderr"
 	sender   LogSender
-	seq      atomic.Int64
+	seq      *atomic.Int64 // shared across stdout+stderr to avoid UNIQUE(run_id,seq) collisions
 	mu       sync.Mutex
 	pending  []api.LogLine
 	partial  strings.Builder // Partial line buffer (no \n yet)
 	done     chan struct{}
 	wg       sync.WaitGroup
+	sendWg   sync.WaitGroup // tracks in-flight background sends
 	closed   bool
 	passthru *limitedWriter // Also write to underlying buffer
 }
 
 // NewStreamWriter creates a StreamWriter that sends log lines via the sender func.
+// The seq counter is shared across stdout and stderr writers for the same run,
+// ensuring unique seq values (the DB has UNIQUE(run_id, seq)).
 // The passthru writer receives all bytes for the completion payload (backward compat).
-func NewStreamWriter(stream string, sender LogSender, passthru *limitedWriter) *StreamWriter {
+func NewStreamWriter(stream string, sender LogSender, passthru *limitedWriter, seq *atomic.Int64) *StreamWriter {
 	sw := &StreamWriter{
 		stream:   stream,
 		sender:   sender,
+		seq:      seq,
 		done:     make(chan struct{}),
 		passthru: passthru,
 	}
@@ -123,6 +127,9 @@ func (sw *StreamWriter) Close() error {
 	close(sw.done)
 	sw.wg.Wait()
 
+	// Wait for all in-flight background sends to complete
+	sw.sendWg.Wait()
+
 	return nil
 }
 
@@ -155,7 +162,9 @@ func (sw *StreamWriter) flushLocked() {
 	sw.pending = sw.pending[:0]
 
 	// Send in background to avoid blocking writes
+	sw.sendWg.Add(1)
 	go func() {
+		defer sw.sendWg.Done()
 		_ = sw.sender(batch) // Best-effort; errors logged by sender
 	}()
 }

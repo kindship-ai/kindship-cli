@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -264,22 +265,38 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		return params.Client.SendLogLines(startResp.ExecutionID, lines, params.ServiceKey)
 	}
 
+	// Shared seq counter for all stream writers in this run.
+	// Both stdout and stderr use this to avoid UNIQUE(run_id, seq) collisions.
+	var sharedSeq atomic.Int64
+
+	// systemSend emits a "system" log line for lifecycle events.
+	systemSend := func(content string) {
+		_ = logSender([]api.LogLine{{
+			Seq:     sharedSeq.Add(1),
+			Stream:  "system",
+			Content: content,
+			Ts:      time.Now().UTC().Format(time.RFC3339Nano),
+		}})
+	}
+
+	systemSend(fmt.Sprintf("Starting: %s (%s)", entityResp.Entity.Title, entityResp.Entity.ExecutionMode))
+
 	var result *executor.ExecutionResult
 	switch entityResp.Entity.ExecutionMode {
 	case api.ExecutionModeLLMReasoning:
-		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender)
+		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender, &sharedSeq)
 	case api.ExecutionModeBash:
-		result = executor.ExecuteBashStreaming(&entityResp.Entity, startResp.Inputs, logSender)
+		result = executor.ExecuteBashStreaming(&entityResp.Entity, startResp.Inputs, logSender, &sharedSeq)
 	case api.ExecutionModePython:
-		result = executor.ExecutePythonStreaming(&entityResp.Entity, startResp.Inputs, logSender)
+		result = executor.ExecutePythonStreaming(&entityResp.Entity, startResp.Inputs, logSender, &sharedSeq)
 	case api.ExecutionModePythonSandbox:
 		// Legacy mode — treat as PYTHON
-		result = executor.ExecutePythonStreaming(&entityResp.Entity, startResp.Inputs, logSender)
+		result = executor.ExecutePythonStreaming(&entityResp.Entity, startResp.Inputs, logSender, &sharedSeq)
 	case api.ExecutionModeHybrid:
 		// HYBRID uses LLM with entity context + code as reference
-		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender)
+		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender, &sharedSeq)
 	case api.ExecutionModeAgent:
-		result = executor.ExecuteAgent(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey)
+		result = executor.ExecuteAgentStreaming(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey, logSender, &sharedSeq)
 	default:
 		log.Error("Unknown execution mode", nil, map[string]interface{}{
 			"mode": entityResp.Entity.ExecutionMode,
@@ -292,6 +309,21 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		"success":   result.Success,
 		"exit_code": result.ExitCode,
 	})
+
+	// Emit system event for completion/failure
+	if result.Success {
+		systemSend(fmt.Sprintf("Completed successfully (exit code 0, %s)", execDuration.Truncate(time.Millisecond)))
+	} else {
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Error()
+		}
+		if reason != "" {
+			systemSend(fmt.Sprintf("Failed (exit code %d, %s): %s", result.ExitCode, execDuration.Truncate(time.Millisecond), reason))
+		} else {
+			systemSend(fmt.Sprintf("Failed (exit code %d, %s)", result.ExitCode, execDuration.Truncate(time.Millisecond)))
+		}
+	}
 
 	// Step 4b: Validate outputs against output_schema if provided (only for successful executions)
 	var structuredOutput map[string]interface{}
@@ -343,6 +375,11 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 					Actual:         extracted,
 				}
 			}
+		}
+
+		// Emit system event for output validation result
+		if outputValidationRecord != nil {
+			systemSend(fmt.Sprintf("Output validation: %s", outputValidationRecord.Outcome))
 		}
 	}
 

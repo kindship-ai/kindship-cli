@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
 )
@@ -51,13 +52,14 @@ func ExecuteLLM(entity *api.PlanningEntity, inputs map[string]interface{}) *Exec
 }
 
 // ExecuteLLMStreaming executes LLM reasoning with real-time log streaming.
-func ExecuteLLMStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender) *ExecutionResult {
+func ExecuteLLMStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender, seq *atomic.Int64) *ExecutionResult {
 	prompt := buildPrompt(entity, inputs)
 
 	cmd := exec.Command("kindship", "auth", "claude",
 		"--dangerously-skip-permissions",
 		"--output-format", "stream-json",
 		"--verbose",
+		"--include-partial-messages",
 		"-p", prompt)
 	cmd.Dir = "/workspace"
 
@@ -66,8 +68,8 @@ func ExecuteLLMStreaming(entity *api.PlanningEntity, inputs map[string]interface
 	stdoutPassthru := &limitedWriter{buf: &stdoutBuf, limit: 10 << 20} // 10MB for LLM
 	stderrPassthru := &limitedWriter{buf: &stderrBuf, limit: 10 << 20}
 
-	stdoutStream := NewStreamWriter("stdout", sender, stdoutPassthru)
-	stderrStream := NewStreamWriter("stderr", sender, stderrPassthru)
+	stdoutStream := NewStreamWriter("stdout", sender, stdoutPassthru, seq)
+	stderrStream := NewStreamWriter("stderr", sender, stderrPassthru, seq)
 
 	cmd.Stdout = stdoutStream
 	cmd.Stderr = stderrStream

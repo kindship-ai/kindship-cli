@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sync/atomic"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
 )
@@ -15,12 +16,12 @@ func ExecutePython(entity *api.PlanningEntity, inputs map[string]interface{}) *E
 }
 
 // ExecutePythonStreaming runs Python code with real-time log streaming.
-func ExecutePythonStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender) *ExecutionResult {
-	return ExecutePythonStreamingWithContext(context.Background(), entity, inputs, sender)
+func ExecutePythonStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender, seq *atomic.Int64) *ExecutionResult {
+	return ExecutePythonStreamingWithContext(context.Background(), entity, inputs, sender, seq)
 }
 
 // ExecutePythonStreamingWithContext runs Python code with streaming and cancellation.
-func ExecutePythonStreamingWithContext(ctx context.Context, entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender) *ExecutionResult {
+func ExecutePythonStreamingWithContext(ctx context.Context, entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender, seq *atomic.Int64) *ExecutionResult {
 	if entity.Code == nil || *entity.Code == "" {
 		return &ExecutionResult{
 			Success:  false,
@@ -40,8 +41,8 @@ func ExecutePythonStreamingWithContext(ctx context.Context, entity *api.Planning
 	stdoutLimited := &limitedWriter{buf: &stdoutBuf, limit: maxOutputBytes}
 	stderrLimited := &limitedWriter{buf: &stderrBuf, limit: maxOutputBytes}
 
-	stdoutStream := NewStreamWriter("stdout", sender, stdoutLimited)
-	stderrStream := NewStreamWriter("stderr", sender, stderrLimited)
+	stdoutStream := NewStreamWriter("stdout", sender, stdoutLimited, seq)
+	stderrStream := NewStreamWriter("stderr", sender, stderrLimited, seq)
 
 	cmd.Stdout = stdoutStream
 	cmd.Stderr = stderrStream
