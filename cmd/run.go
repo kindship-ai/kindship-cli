@@ -259,20 +259,25 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	})
 	execStart := time.Now()
 
+	// Create log line sender for real-time streaming
+	logSender := func(lines []api.LogLine) error {
+		return params.Client.SendLogLines(startResp.ExecutionID, lines, params.ServiceKey)
+	}
+
 	var result *executor.ExecutionResult
 	switch entityResp.Entity.ExecutionMode {
 	case api.ExecutionModeLLMReasoning:
-		result = executor.ExecuteLLM(&entityResp.Entity, startResp.Inputs)
+		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender)
 	case api.ExecutionModeBash:
-		result = executor.ExecuteBash(&entityResp.Entity, startResp.Inputs)
+		result = executor.ExecuteBashStreaming(&entityResp.Entity, startResp.Inputs, logSender)
 	case api.ExecutionModePython:
-		result = executor.ExecutePython(&entityResp.Entity, startResp.Inputs)
+		result = executor.ExecutePythonStreaming(&entityResp.Entity, startResp.Inputs, logSender)
 	case api.ExecutionModePythonSandbox:
 		// Legacy mode — treat as PYTHON
-		result = executor.ExecutePython(&entityResp.Entity, startResp.Inputs)
+		result = executor.ExecutePythonStreaming(&entityResp.Entity, startResp.Inputs, logSender)
 	case api.ExecutionModeHybrid:
 		// HYBRID uses LLM with entity context + code as reference
-		result = executor.ExecuteLLM(&entityResp.Entity, startResp.Inputs)
+		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender)
 	case api.ExecutionModeAgent:
 		result = executor.ExecuteAgent(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey)
 	default:

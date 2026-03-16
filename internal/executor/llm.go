@@ -50,6 +50,51 @@ func ExecuteLLM(entity *api.PlanningEntity, inputs map[string]interface{}) *Exec
 	}
 }
 
+// ExecuteLLMStreaming executes LLM reasoning with real-time log streaming.
+func ExecuteLLMStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender) *ExecutionResult {
+	prompt := buildPrompt(entity, inputs)
+
+	cmd := exec.Command("kindship", "auth", "claude",
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose",
+		"-p", prompt)
+	cmd.Dir = "/workspace"
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	// No limit on LLM output (matching existing pattern)
+	stdoutPassthru := &limitedWriter{buf: &stdoutBuf, limit: 10 << 20} // 10MB for LLM
+	stderrPassthru := &limitedWriter{buf: &stderrBuf, limit: 10 << 20}
+
+	stdoutStream := NewStreamWriter("stdout", sender, stdoutPassthru)
+	stderrStream := NewStreamWriter("stderr", sender, stderrPassthru)
+
+	cmd.Stdout = stdoutStream
+	cmd.Stderr = stderrStream
+
+	err := cmd.Run()
+
+	stdoutStream.Close()
+	stderrStream.Close()
+
+	exitCode := 0
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+
+	return &ExecutionResult{
+		Success:  exitCode == 0,
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
+		ExitCode: exitCode,
+		Error:    err,
+	}
+}
+
 // buildPrompt creates a comprehensive prompt for Claude Code
 func buildPrompt(entity *api.PlanningEntity, inputs map[string]interface{}) string {
 	var prompt strings.Builder

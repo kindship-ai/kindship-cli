@@ -281,6 +281,25 @@ type TaskSpec struct {
 	Boundaries          map[string]interface{} `json:"boundaries,omitempty"`
 }
 
+// LogLine represents a single log line for streaming execution output
+type LogLine struct {
+	Seq     int64  `json:"seq"`
+	Stream  string `json:"stream"` // stdout, stderr, system
+	Content string `json:"content"`
+	Ts      string `json:"ts"`
+}
+
+// SendLogLinesRequest is the request body for the log lines endpoint
+type SendLogLinesRequest struct {
+	Lines []LogLine `json:"lines"`
+}
+
+// SendLogLinesResponse is the response from the log lines endpoint
+type SendLogLinesResponse struct {
+	Inserted int    `json:"inserted"`
+	Error    string `json:"error,omitempty"`
+}
+
 // ExportEntity represents a single entity in the flat export array
 type ExportEntity struct {
 	ID                  string                 `json:"id"`

@@ -352,6 +352,84 @@ func (c *Client) CompleteExecutionWithBearer(executionID string, req ExecutionCo
 	return &completeResp, nil
 }
 
+// SendLogLines sends a batch of log lines for a running execution.
+// Non-fatal errors are logged but not propagated (broadcast is best-effort).
+func (c *Client) SendLogLines(executionID string, lines []LogLine, serviceKey string) error {
+	if len(lines) == 0 {
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("%s/api/planning/execution/%s/logs", c.baseURL, executionID)
+
+	jsonData, err := json.Marshal(SendLogLinesRequest{Lines: lines})
+	if err != nil {
+		return fmt.Errorf("failed to marshal log lines: %w", err)
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("X-Kindship-Service-Key", serviceKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		c.log("Failed to send log lines: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		c.log("Log lines API error (%d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("log lines API error (%d)", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// SendLogLinesWithBearer sends log lines using bearer token auth.
+func (c *Client) SendLogLinesWithBearer(executionID string, lines []LogLine, bearerToken string) error {
+	if len(lines) == 0 {
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("%s/api/planning/execution/%s/logs", c.baseURL, executionID)
+
+	jsonData, err := json.Marshal(SendLogLinesRequest{Lines: lines})
+	if err != nil {
+		return fmt.Errorf("failed to marshal log lines: %w", err)
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", formatBearerHeader(bearerToken))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		c.log("Failed to send log lines (bearer): %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		c.log("Log lines API error (bearer) (%d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("log lines API error (%d)", resp.StatusCode)
+	}
+
+	return nil
+}
+
 func formatBearerHeader(tokenOrHeader string) string {
 	trimmed := strings.TrimSpace(tokenOrHeader)
 	if trimmed == "" {

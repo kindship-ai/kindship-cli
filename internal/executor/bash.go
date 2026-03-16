@@ -23,6 +23,71 @@ func ExecuteBash(entity *api.PlanningEntity, inputs map[string]interface{}) *Exe
 	return ExecuteBashWithContext(context.Background(), entity, inputs)
 }
 
+// ExecuteBashStreaming runs a shell command with real-time log streaming.
+func ExecuteBashStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender) *ExecutionResult {
+	return ExecuteBashStreamingWithContext(context.Background(), entity, inputs, sender)
+}
+
+// ExecuteBashStreamingWithContext runs a shell command with streaming and cancellation.
+func ExecuteBashStreamingWithContext(ctx context.Context, entity *api.PlanningEntity, inputs map[string]interface{}, sender LogSender) *ExecutionResult {
+	if entity.Code == nil || *entity.Code == "" {
+		return &ExecutionResult{
+			Success:  false,
+			ExitCode: 1,
+			Error:    fmt.Errorf("no code provided for BASH execution"),
+		}
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, DefaultExecTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, "sh", "-c", *entity.Code)
+	cmd.Dir = "/workspace"
+	cmd.Env = buildEnvWithInputs(inputs)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutLimited := &limitedWriter{buf: &stdoutBuf, limit: maxOutputBytes}
+	stderrLimited := &limitedWriter{buf: &stderrBuf, limit: maxOutputBytes}
+
+	stdoutStream := NewStreamWriter("stdout", sender, stdoutLimited)
+	stderrStream := NewStreamWriter("stderr", sender, stderrLimited)
+
+	cmd.Stdout = stdoutStream
+	cmd.Stderr = stderrStream
+
+	err := cmd.Run()
+
+	// Close stream writers BEFORE returning — ensures final flush
+	stdoutStream.Close()
+	stderrStream.Close()
+
+	exitCode := 0
+	if err != nil {
+		if execCtx.Err() == context.DeadlineExceeded {
+			return &ExecutionResult{
+				Success:  false,
+				Stdout:   stdoutBuf.String(),
+				Stderr:   stderrBuf.String(),
+				ExitCode: 124,
+				Error:    fmt.Errorf("execution timed out after %v", DefaultExecTimeout),
+			}
+		}
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+
+	return &ExecutionResult{
+		Success:  exitCode == 0,
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
+		ExitCode: exitCode,
+		Error:    err,
+	}
+}
+
 // ExecuteBashWithContext runs a shell command with context for cancellation/timeout.
 func ExecuteBashWithContext(ctx context.Context, entity *api.PlanningEntity, inputs map[string]interface{}) *ExecutionResult {
 	if entity.Code == nil || *entity.Code == "" {
