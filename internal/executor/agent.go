@@ -111,7 +111,7 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 
 	return &ExecutionResult{
 		Success:  exitCode == 0,
-		Stdout:   stdoutBuf.String(),
+		Stdout:   reduceStreamJSONForCompletion(stdoutBuf.String()),
 		Stderr:   stderrBuf.String(),
 		ExitCode: exitCode,
 		Error:    execErr,

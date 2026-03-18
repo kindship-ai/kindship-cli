@@ -90,7 +90,7 @@ func ExecuteLLMStreaming(entity *api.PlanningEntity, inputs map[string]interface
 
 	return &ExecutionResult{
 		Success:  exitCode == 0,
-		Stdout:   stdoutBuf.String(),
+		Stdout:   reduceStreamJSONForCompletion(stdoutBuf.String()),
 		Stderr:   stderrBuf.String(),
 		ExitCode: exitCode,
 		Error:    err,
