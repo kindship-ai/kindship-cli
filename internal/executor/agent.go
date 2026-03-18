@@ -2,9 +2,7 @@ package executor
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"sync/atomic"
 
@@ -13,16 +11,11 @@ import (
 
 // ExecuteAgent executes a planning entity using Claude Code with the full
 // agent system prompt injected via --append-system-prompt.
-// Falls back to ExecuteLLM on transient API errors (5xx, timeout).
+// Fails if the system prompt cannot be fetched.
 func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string) *ExecutionResult {
 	// 1. Fetch system prompt from API
 	systemPrompt, err := client.FetchSystemPrompt(entity.AgentID, serviceKey)
 	if err != nil {
-		// Differentiate transient vs permanent errors
-		if isTransientError(err) {
-			fmt.Fprintf(os.Stderr, "[kindship:agent] Warning: failed to fetch system prompt (%v), falling back to LLM_REASONING\n", err)
-			return ExecuteLLM(entity, inputs)
-		}
 		return &ExecutionResult{
 			Success:  false,
 			ExitCode: 1,
@@ -66,16 +59,11 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 
 // ExecuteAgentStreaming executes a planning entity using Claude Code with the full
 // agent system prompt, streaming logs in real-time via LogSender.
-// Falls back to ExecuteLLMStreaming on transient API errors (5xx, timeout).
+// Fails if the system prompt cannot be fetched.
 func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64) *ExecutionResult {
 	// 1. Fetch system prompt from API
 	systemPrompt, err := client.FetchSystemPrompt(entity.AgentID, serviceKey)
 	if err != nil {
-		// Differentiate transient vs permanent errors
-		if isTransientError(err) {
-			fmt.Fprintf(os.Stderr, "[kindship:agent] Warning: failed to fetch system prompt (%v), falling back to LLM_REASONING streaming\n", err)
-			return ExecuteLLMStreaming(entity, inputs, sender, seq)
-		}
 		return &ExecutionResult{
 			Success:  false,
 			ExitCode: 1,
@@ -128,15 +116,4 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 		ExitCode: exitCode,
 		Error:    execErr,
 	}
-}
-
-// isTransientError returns true for errors likely caused by temporary server issues
-// (5xx status codes, network timeouts) where a fallback to LLM_REASONING is appropriate.
-func isTransientError(err error) bool {
-	var apiErr *api.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode >= 500
-	}
-	// Network errors (timeouts, connection refused) are also transient
-	return false
 }
