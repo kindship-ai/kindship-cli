@@ -59,8 +59,10 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 
 // ExecuteAgentStreaming executes a planning entity using Claude Code with the full
 // agent system prompt, streaming logs in real-time via LogSender.
+// Supports session continuity via sessionID/isResume for system-chat.
+// Retrieves memU memory context and appends to system prompt.
 // Fails if the system prompt cannot be fetched.
-func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64) *ExecutionResult {
+func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64, sessionID string, isResume bool) *ExecutionResult {
 	// 1. Fetch system prompt from API
 	systemPrompt, err := client.FetchSystemPrompt(entity.AgentID, serviceKey)
 	if err != nil {
@@ -71,18 +73,41 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 		}
 	}
 
-	// 2. Build task prompt (reuse existing buildPrompt)
+	// 2. Retrieve memU memory context for this entity (non-blocking)
+	memoryContext, memErr := client.RetrieveMemoryForEntity(entity.ID, serviceKey)
+	if memErr != nil {
+		// Log but don't fail — graceful degradation
+		fmt.Printf("[memU] Failed to retrieve memory context: %v\n", memErr)
+	}
+	if memoryContext != "" {
+		systemPrompt = systemPrompt + "\n\n" + memoryContext
+	}
+
+	// 3. Build task prompt (reuse existing buildPrompt)
 	taskPrompt := buildPrompt(entity, inputs)
 
-	// 3. Execute with streaming flags + system prompt
-	cmd := exec.Command("kindship", "auth", "claude",
+	// 4. Build command args with streaming flags + system prompt
+	args := []string{
+		"auth", "claude",
 		"--dangerously-skip-permissions",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--include-partial-messages",
 		"--append-system-prompt", systemPrompt,
-		"-p", taskPrompt,
-	)
+	}
+
+	// Add session continuity flags for system-chat
+	if sessionID != "" {
+		if isResume {
+			args = append(args, "--resume", sessionID)
+		} else {
+			args = append(args, "--session-id", sessionID)
+		}
+	}
+
+	args = append(args, "-p", taskPrompt)
+
+	cmd := exec.Command("kindship", args...)
 	cmd.Dir = "/workspace"
 
 	var stdoutBuf, stderrBuf bytes.Buffer

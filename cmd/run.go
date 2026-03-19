@@ -21,6 +21,8 @@ var (
 	agentID    string
 	serviceKey string
 	apiURL     string
+	sessionID  string
+	resume     bool
 )
 
 // ErrAskUserSkipped is returned when an ASK_USER task is started but not
@@ -87,6 +89,9 @@ func runExecute(cmd *cobra.Command, args []string) error {
 		log.Error("KINDSHIP_SERVICE_KEY not provided", nil)
 		return fmt.Errorf("KINDSHIP_SERVICE_KEY is required (use --service-key flag or KINDSHIP_SERVICE_KEY environment variable)")
 	}
+	if resume && sessionID == "" {
+		return fmt.Errorf("--resume requires --session-id")
+	}
 
 	// Create API client
 	client := api.NewClient(apiURL, verbose)
@@ -118,6 +123,8 @@ func runExecute(cmd *cobra.Command, args []string) error {
 		ServiceKey: serviceKey,
 		Client:     client,
 		Log:        log,
+		SessionID:  sessionID,
+		Resume:     resume,
 	})
 
 	if err != nil {
@@ -144,6 +151,8 @@ type EntityExecutionParams struct {
 	Client      *api.Client
 	Log         *logging.Logger
 	ParentRunID string // ORCHESTRATE run ID (empty for top-level runs)
+	SessionID   string // Claude Code session ID for session continuity
+	Resume      bool   // Resume existing session (--resume flag)
 }
 
 // executeEntity runs the full execution lifecycle for a single entity.
@@ -229,6 +238,7 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		ExecutionMode: entityResp.Entity.ExecutionMode,
 		AgentID:       params.AgentID,
 		ParentRun:     params.ParentRunID,
+		SessionID:     params.SessionID,
 	}
 	startResp, err := params.Client.StartExecution(startExecReq, params.ServiceKey)
 	if err != nil {
@@ -296,7 +306,7 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		// HYBRID uses LLM with entity context + code as reference
 		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender, &sharedSeq)
 	case api.ExecutionModeAgent:
-		result = executor.ExecuteAgentStreaming(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey, logSender, &sharedSeq)
+		result = executor.ExecuteAgentStreaming(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey, logSender, &sharedSeq, params.SessionID, params.Resume)
 	default:
 		log.Error("Unknown execution mode", nil, map[string]interface{}{
 			"mode": entityResp.Entity.ExecutionMode,
@@ -721,4 +731,6 @@ func init() {
 	runCmd.Flags().StringVar(&agentID, "agent-id", "", "Agent container ID (defaults to AGENT_ID env var)")
 	runCmd.Flags().StringVar(&serviceKey, "service-key", "", "Service key for authentication (defaults to KINDSHIP_SERVICE_KEY env var)")
 	runCmd.Flags().StringVar(&apiURL, "api-url", "", "API base URL (defaults to KINDSHIP_API_URL env var or https://kindship.ai)")
+	runCmd.Flags().StringVar(&sessionID, "session-id", "", "Claude Code session ID for session continuity")
+	runCmd.Flags().BoolVar(&resume, "resume", false, "Resume an existing Claude Code session (requires --session-id)")
 }

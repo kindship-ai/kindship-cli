@@ -1485,6 +1485,46 @@ func (c *Client) FetchSystemPrompt(agentID, serviceKey string) (string, error) {
 	return result.Prompt, nil
 }
 
+// RetrieveMemoryForEntity fetches memU memory context for a planning entity.
+// Returns formatted memory context string, or empty string on failure.
+func (c *Client) RetrieveMemoryForEntity(entityID, serviceKey string) (string, error) {
+	endpoint := fmt.Sprintf("%s/api/memu/retrieve-for-entity?entity_id=%s", c.baseURL, entityID)
+	c.log("Retrieving memU memory context for entity: %s", entityID)
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", &APIError{StatusCode: resp.StatusCode, Body: string(body)}
+	}
+
+	var result struct {
+		MemoryContext string `json:"memory_context"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return result.MemoryContext, nil
+}
+
 // MoveEntity moves an entity to a new parent and/or sequence position.
 func (c *Client) MoveEntity(ctx *auth.Context, entityID string, moveReq EntityMoveRequest) (*EntityMoveResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/entity/%s/move", c.baseURL, entityID)
