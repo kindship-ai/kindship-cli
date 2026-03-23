@@ -243,6 +243,21 @@ func init() {
 	rootCmd.AddCommand(siteCmd)
 }
 
+// handleNonJSONResponse checks if a response body is non-JSON (e.g., Cloudflare
+// HTML error pages on 502/503) and returns an error with the HTTP status and a
+// body snippet. Returns nil if the body looks like JSON and should be parsed.
+func handleNonJSONResponse(statusCode int, body []byte) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		return nil // looks like JSON, caller should parse it
+	}
+	snippet := string(body)
+	if len(snippet) > 200 {
+		snippet = snippet[:200] + "..."
+	}
+	return fmt.Errorf("server returned HTTP %d with non-JSON body: %s", statusCode, snippet)
+}
+
 func defaultSiteWorkspaceDir(ctx *auth.Context, siteName string) (string, error) {
 	if strings.TrimSpace(siteName) == "" || strings.ContainsAny(siteName, `/\`) || siteName == "." || siteName == ".." {
 		return "", fmt.Errorf("invalid site name for workspace path: %q", siteName)
@@ -507,6 +522,10 @@ func runSiteCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to create site: %w", err)
+	}
+
 	var createResp api.SiteCreateResponse
 	if err := json.Unmarshal(body, &createResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
@@ -587,6 +606,10 @@ func runSiteList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to list sites: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		var errResp api.SiteListResponse
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
@@ -656,6 +679,10 @@ func runSiteStatus(cmd *cobra.Command, args []string) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to get site status: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -773,6 +800,10 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("push failed: %w", err)
+	}
+
 	var pushResp api.SitePushResponse
 	if err := json.Unmarshal(body, &pushResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
@@ -842,6 +873,10 @@ func runSiteLogs(cmd *cobra.Command, args []string) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to get logs: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -917,6 +952,10 @@ func runSiteDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to delete site: %w", err)
+	}
+
 	var deleteResp api.SiteDeleteResponse
 	if err := json.Unmarshal(body, &deleteResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
@@ -978,6 +1017,10 @@ func runSiteDomainSet(cmd *cobra.Command, args []string) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to set custom domain: %w", err)
 	}
 
 	var domainResp api.SiteDomainResponse
@@ -1048,6 +1091,10 @@ func runSiteDomainStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to get domain status: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		var errResp api.SiteDomainResponse
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
@@ -1114,6 +1161,10 @@ func runSiteDomainRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to remove custom domain: %w", err)
+	}
+
 	var removeResp api.SiteDomainRemoveResponse
 	if err := json.Unmarshal(body, &removeResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
@@ -1160,6 +1211,10 @@ func runSiteDomainCheck(cmd *cobra.Command, args []string) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to check domain: %w", err)
 	}
 
 	var checkResp api.DomainCheckResponse
@@ -1237,6 +1292,10 @@ func runSiteDomainRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to register domain: %w", err)
+	}
+
 	var regResp api.DomainRegisterResponse
 	if err := json.Unmarshal(body, &regResp); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
@@ -1294,6 +1353,10 @@ func runSiteDomainRegisterStatus(cmd *cobra.Command, args []string) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to get registration status: %w", err)
 	}
 
 	var regResp api.DomainRegisterResponse
