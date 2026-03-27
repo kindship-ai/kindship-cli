@@ -113,7 +113,7 @@ func runExecute(cmd *cobra.Command, args []string) error {
 			"entity_title": entityResp.Entity.Title,
 			"entity_type":  entityResp.Entity.Type,
 		})
-		return runOrchestration(entityID, client, log)
+		return runOrchestration(entityID, sessionID, client, log)
 	}
 
 	// Otherwise, execute a single entity
@@ -224,7 +224,7 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 			"run_id":    orchStartResp.ExecutionID,
 			"entity_id": params.EntityID,
 		})
-		orchLoopErr := orchestrateChildren(params.EntityID, orchStartResp.ExecutionID, params.Client, params.Log)
+		orchLoopErr := orchestrateChildren(params.EntityID, orchStartResp.ExecutionID, params.SessionID, params.Client, params.Log)
 		if orchLoopErr != nil {
 			return false, orchLoopErr
 		}
@@ -481,7 +481,7 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 
 // runOrchestration creates a new ORCHESTRATE run for any entity with
 // execution_mode=ORCHESTRATE and orchestrates its child tasks.
-func runOrchestration(entityID string, client *api.Client, log *logging.Logger) error {
+func runOrchestration(entityID, sessionID string, client *api.Client, log *logging.Logger) error {
 	// Create Run for the entity
 	startReq := api.ExecutionStartRequest{
 		EntityID:      entityID,
@@ -500,25 +500,25 @@ func runOrchestration(entityID string, client *api.Client, log *logging.Logger) 
 		"entity_id": entityID,
 	})
 
-	return orchestrateChildren(entityID, runID, client, log)
+	return orchestrateChildren(entityID, runID, sessionID, client, log)
 }
 
 // resumeOrchestration resumes an existing ORCHESTRATE run after container
 // restart, re-entering the child orchestration polling loop.
 // Works for any entity type (PROCESS, PROJECT, TASK-with-children).
-func resumeOrchestration(entityID, runID string, client *api.Client, log *logging.Logger) error {
+func resumeOrchestration(entityID, runID, sessionID string, client *api.Client, log *logging.Logger) error {
 	log.Info("Resuming ORCHESTRATE run", map[string]interface{}{
 		"entity_id": entityID,
 		"run_id":    runID,
 	})
 
-	return orchestrateChildren(entityID, runID, client, log)
+	return orchestrateChildren(entityID, runID, sessionID, client, log)
 }
 
 // orchestrateChildren is the shared polling loop for ORCHESTRATE runs.
 // It polls for runnable child tasks, executes them, and completes the
 // parent run when all children are done.
-func orchestrateChildren(entityID, runID string, client *api.Client, log *logging.Logger) error {
+func orchestrateChildren(entityID, runID, sessionID string, client *api.Client, log *logging.Logger) error {
 	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -631,6 +631,8 @@ func orchestrateChildren(entityID, runID string, client *api.Client, log *loggin
 			Client:      client,
 			Log:         log,
 			ParentRunID: runID,
+			SessionID:   sessionID,
+			Resume:      sessionID != "",
 		})
 
 		if err != nil {

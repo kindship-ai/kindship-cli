@@ -132,7 +132,7 @@ func runLoop(cmd *cobra.Command, args []string) error {
 				}
 				go func(entityID, runID string) {
 					defer activeResumes.Delete(runID)
-					if resumeErr := resumeOrchestration(entityID, runID, client, log); resumeErr != nil {
+					if resumeErr := resumeOrchestration(entityID, runID, entityID, client, log); resumeErr != nil {
 						log.Error("Failed to resume ORCHESTRATE run", resumeErr, map[string]interface{}{
 							"entity_id": entityID,
 							"run_id":    runID,
