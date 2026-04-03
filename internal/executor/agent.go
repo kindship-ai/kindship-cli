@@ -3,16 +3,81 @@ package executor
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"sync/atomic"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
 )
 
-// ExecuteAgent executes a planning entity using Claude Code with the full
-// agent system prompt injected via --append-system-prompt.
+// resolveInnerLoopCli returns the coding CLI to use for AGENT execution.
+// Reads INNER_LOOP_CLI env var, defaults to "claude".
+func resolveInnerLoopCli() string {
+	cli := os.Getenv("INNER_LOOP_CLI")
+	switch cli {
+	case "claude", "codex", "gemini", "opencode":
+		return cli
+	default:
+		return "claude"
+	}
+}
+
+// buildCliArgs constructs the command-line arguments for the selected coding CLI.
+// Each CLI has different flags for headless execution.
+func buildCliArgs(cli string, systemPrompt string, taskPrompt string, sessionID string, isResume bool) (command string, args []string) {
+	switch cli {
+	case "codex":
+		// codex exec <prompt> --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+		args = []string{
+			"exec",
+			taskPrompt,
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--skip-git-repo-check",
+		}
+		return "codex", args
+
+	case "gemini":
+		// gemini -p <prompt> --sandbox false
+		args = []string{
+			"-p", taskPrompt,
+		}
+		return "gemini", args
+
+	case "opencode":
+		// opencode -p <prompt>
+		args = []string{
+			"-p", taskPrompt,
+		}
+		return "opencode", args
+
+	default: // claude
+		args = []string{
+			"--dangerously-skip-permissions",
+			"--output-format", "stream-json",
+			"--verbose",
+			"--include-partial-messages",
+			"--append-system-prompt", systemPrompt,
+		}
+
+		// Session continuity (Claude Code only)
+		if sessionID != "" {
+			if isResume {
+				args = append(args, "--resume", sessionID)
+			} else {
+				args = append(args, "--session-id", sessionID)
+			}
+		}
+
+		args = append(args, "-p", taskPrompt)
+		return "claude", args
+	}
+}
+
+// ExecuteAgent executes a planning entity using the selected coding CLI.
 // Fails if the system prompt cannot be fetched.
 func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string) *ExecutionResult {
+	cli := resolveInnerLoopCli()
+
 	// 1. Fetch system prompt from API
 	systemPrompt, err := client.FetchSystemPrompt(entity.AgentID, serviceKey)
 	if err != nil {
@@ -26,12 +91,12 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 	// 2. Build task prompt (reuse existing buildPrompt)
 	taskPrompt := buildPrompt(entity, inputs)
 
-	// 3. Execute with --dangerously-skip-permissions + --append-system-prompt
-	cmd := exec.Command("kindship", "auth", "claude",
-		"--dangerously-skip-permissions",
-		"--append-system-prompt", systemPrompt,
-		"-p", taskPrompt,
-	)
+	// 3. Build CLI-specific args
+	cliCommand, cliArgs := buildCliArgs(cli, systemPrompt, taskPrompt, "", false)
+
+	// 4. Execute via kindship auth <cli> which injects secrets
+	fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
+	cmd := exec.Command("kindship", fullArgs...)
 	cmd.Dir = "/workspace"
 
 	var stdout, stderr bytes.Buffer
@@ -57,12 +122,13 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 	}
 }
 
-// ExecuteAgentStreaming executes a planning entity using Claude Code with the full
-// agent system prompt, streaming logs in real-time via LogSender.
-// Supports session continuity via sessionID/isResume for system-chat.
+// ExecuteAgentStreaming executes a planning entity using the selected coding CLI,
+// streaming logs in real-time via LogSender.
+// Supports session continuity via sessionID/isResume for system-chat (Claude only).
 // Retrieves memU memory context and appends to system prompt.
-// Fails if the system prompt cannot be fetched.
 func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64, sessionID string, isResume bool) *ExecutionResult {
+	cli := resolveInnerLoopCli()
+
 	// 1. Fetch system prompt from API
 	systemPrompt, err := client.FetchSystemPrompt(entity.AgentID, serviceKey)
 	if err != nil {
@@ -86,29 +152,15 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 	// 3. Build task prompt (reuse existing buildPrompt)
 	taskPrompt := buildPrompt(entity, inputs)
 
-	// 4. Build command args with streaming flags + system prompt
-	args := []string{
-		"auth", "claude",
-		"--dangerously-skip-permissions",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--include-partial-messages",
-		"--append-system-prompt", systemPrompt,
-	}
+	// 4. Build CLI-specific args
+	cliCommand, cliArgs := buildCliArgs(cli, systemPrompt, taskPrompt, sessionID, isResume)
 
-	// Add session continuity flags for system-chat
-	if sessionID != "" {
-		if isResume {
-			args = append(args, "--resume", sessionID)
-		} else {
-			args = append(args, "--session-id", sessionID)
-		}
-	}
-
-	args = append(args, "-p", taskPrompt)
-
-	cmd := exec.Command("kindship", args...)
+	// 5. Execute via kindship auth <cli> which injects secrets
+	fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
+	cmd := exec.Command("kindship", fullArgs...)
 	cmd.Dir = "/workspace"
+
+	fmt.Printf("[inner-loop] Using CLI: %s (command: kindship auth %s)\n", cli, cliCommand)
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	stdoutPassthru := &limitedWriter{buf: &stdoutBuf, limit: 10 << 20} // 10MB for agent
@@ -134,9 +186,15 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 		}
 	}
 
+	// Only reduce stream-json for Claude (other CLIs don't output this format)
+	stdout := stdoutBuf.String()
+	if cli == "claude" {
+		stdout = reduceStreamJSONForCompletion(stdout)
+	}
+
 	return &ExecutionResult{
 		Success:  exitCode == 0,
-		Stdout:   reduceStreamJSONForCompletion(stdoutBuf.String()),
+		Stdout:   stdout,
 		Stderr:   stderrBuf.String(),
 		ExitCode: exitCode,
 		Error:    execErr,
