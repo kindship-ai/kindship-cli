@@ -22,31 +22,44 @@ func resolveInnerLoopCli() string {
 	}
 }
 
+// resolveInnerLoopModel returns the model to use for AGENT execution.
+// Reads INNER_LOOP_MODEL env var. Empty string means CLI default.
+func resolveInnerLoopModel() string {
+	return os.Getenv("INNER_LOOP_MODEL")
+}
+
 // buildCliArgs constructs the command-line arguments for the selected coding CLI.
 // Each CLI has different flags for headless execution.
-func buildCliArgs(cli string, systemPrompt string, taskPrompt string, sessionID string, isResume bool) (command string, args []string) {
+// model is the INNER_LOOP_MODEL env var value (e.g., "gpt-5.4", "claude-sonnet-4-6").
+func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt string, sessionID string, isResume bool) (command string, args []string) {
 	switch cli {
 	case "codex":
-		// codex exec <prompt> --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
 		args = []string{
 			"exec",
 			taskPrompt,
 			"--dangerously-bypass-approvals-and-sandbox",
 			"--skip-git-repo-check",
 		}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
 		return "codex", args
 
 	case "gemini":
-		// gemini -p <prompt> --sandbox false
 		args = []string{
 			"-p", taskPrompt,
+		}
+		if model != "" {
+			args = append(args, "-m", model)
 		}
 		return "gemini", args
 
 	case "opencode":
-		// opencode -p <prompt>
 		args = []string{
-			"-p", taskPrompt,
+			"run", taskPrompt,
+		}
+		if model != "" {
+			args = append(args, "-m", model)
 		}
 		return "opencode", args
 
@@ -57,6 +70,9 @@ func buildCliArgs(cli string, systemPrompt string, taskPrompt string, sessionID 
 			"--verbose",
 			"--include-partial-messages",
 			"--append-system-prompt", systemPrompt,
+		}
+		if model != "" {
+			args = append(args, "--model", model)
 		}
 
 		// Session continuity (Claude Code only)
@@ -77,6 +93,7 @@ func buildCliArgs(cli string, systemPrompt string, taskPrompt string, sessionID 
 // Fails if the system prompt cannot be fetched.
 func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string) *ExecutionResult {
 	cli := resolveInnerLoopCli()
+	model := resolveInnerLoopModel()
 
 	// 1. Fetch system prompt from API
 	systemPrompt, err := client.FetchSystemPrompt(entity.AgentID, serviceKey)
@@ -92,7 +109,7 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 	taskPrompt := buildPrompt(entity, inputs)
 
 	// 3. Build CLI-specific args
-	cliCommand, cliArgs := buildCliArgs(cli, systemPrompt, taskPrompt, "", false)
+	cliCommand, cliArgs := buildCliArgs(cli, model, systemPrompt, taskPrompt, "", false)
 
 	// 4. Execute via kindship auth <cli> which injects secrets
 	fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
@@ -128,6 +145,7 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 // Retrieves memU memory context and appends to system prompt.
 func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64, sessionID string, isResume bool) *ExecutionResult {
 	cli := resolveInnerLoopCli()
+	model := resolveInnerLoopModel()
 
 	// 1. Fetch system prompt from API
 	systemPrompt, err := client.FetchSystemPrompt(entity.AgentID, serviceKey)
@@ -153,7 +171,7 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 	taskPrompt := buildPrompt(entity, inputs)
 
 	// 4. Build CLI-specific args
-	cliCommand, cliArgs := buildCliArgs(cli, systemPrompt, taskPrompt, sessionID, isResume)
+	cliCommand, cliArgs := buildCliArgs(cli, model, systemPrompt, taskPrompt, sessionID, isResume)
 
 	// 5. Execute via kindship auth <cli> which injects secrets
 	fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
