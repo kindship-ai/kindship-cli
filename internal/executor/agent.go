@@ -37,18 +37,16 @@ func writeInstructionFile(cli string, content string) error {
 		return nil
 	}
 
+	// Use global/user-level paths (not /workspace/) to avoid clobbering
+	// any AGENTS.md the agent creates as part of its work.
 	var filePath string
 	switch cli {
 	case "codex":
-		// Codex reads AGENTS.md from workspace and ~/.codex/AGENTS.md globally
-		filePath = "/workspace/AGENTS.md"
+		filePath = "/home/autonomous/.codex/AGENTS.md"
 	case "gemini":
-		// Gemini reads GEMINI.md from workspace and ~/.gemini/GEMINI.md globally
-		filePath = "/workspace/GEMINI.md"
+		filePath = "/home/autonomous/.gemini/GEMINI.md"
 	case "opencode":
-		// OpenCode reads AGENTS.md from workspace and ~/.config/opencode/AGENTS.md globally
-		// Also falls back to CLAUDE.md
-		filePath = "/workspace/AGENTS.md"
+		filePath = "/home/autonomous/.config/opencode/AGENTS.md"
 	default:
 		return nil // Claude uses --append-system-prompt flag, no file needed
 	}
