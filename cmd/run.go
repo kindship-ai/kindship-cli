@@ -237,6 +237,7 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		EntityID:      params.EntityID,
 		ExecutionMode: entityResp.Entity.ExecutionMode,
 		AgentID:       params.AgentID,
+		CLI:           os.Getenv("INNER_LOOP_CLI"),
 		ParentRun:     params.ParentRunID,
 		SessionID:     params.SessionID,
 	}

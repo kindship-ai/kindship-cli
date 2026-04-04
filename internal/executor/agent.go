@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync/atomic"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
@@ -28,6 +29,63 @@ func resolveInnerLoopModel() string {
 	return os.Getenv("INNER_LOOP_MODEL")
 }
 
+// writeInstructionFile writes the system prompt to the appropriate instruction
+// file for non-Claude CLIs. Each CLI discovers instructions from specific
+// file paths (validated in cli-research docs).
+func writeInstructionFile(cli string, content string) error {
+	if content == "" {
+		return nil
+	}
+
+	var filePath string
+	switch cli {
+	case "codex":
+		// Codex reads AGENTS.md from workspace and ~/.codex/AGENTS.md globally
+		filePath = "/workspace/AGENTS.md"
+	case "gemini":
+		// Gemini reads GEMINI.md from workspace and ~/.gemini/GEMINI.md globally
+		filePath = "/workspace/GEMINI.md"
+	case "opencode":
+		// OpenCode reads AGENTS.md from workspace and ~/.config/opencode/AGENTS.md globally
+		// Also falls back to CLAUDE.md
+		filePath = "/workspace/AGENTS.md"
+	default:
+		return nil // Claude uses --append-system-prompt flag, no file needed
+	}
+
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory for instruction file: %w", err)
+	}
+
+	return os.WriteFile(filePath, []byte(content), 0644)
+}
+
+// writeOpenCodePermissionConfig writes the OpenCode permission config file
+// to allow full tool access in headless mode (equivalent to --dangerously-skip-permissions).
+func writeOpenCodePermissionConfig() error {
+	config := `{"$schema":"https://opencode.ai/config.json","permission":"allow"}`
+	return os.WriteFile("/workspace/opencode.json", []byte(config), 0644)
+}
+
+// translateOpenCodeModel translates UI model IDs to OpenCode-native model IDs.
+// Matches the OPENCODE_MODEL_MAP in cli-runtime.ts.
+func translateOpenCodeModel(model string) string {
+	translations := map[string]string{
+		"minimax-m2.5":   "opencode/minimax-m2.5-free",
+		"mimo-v2-pro":    "opencode/mimo-v2-pro-free",
+		"deepseek-v3.2":  "opencode/gpt-5-nano", // fallback — deepseek model ID needs verification
+	}
+	if translated, ok := translations[model]; ok {
+		return translated
+	}
+	// Unknown models get opencode/ prefix
+	if model != "" {
+		return "opencode/" + model
+	}
+	return model
+}
+
 // buildCliArgs constructs the command-line arguments for the selected coding CLI.
 // Each CLI has different flags for headless execution.
 // model is the INNER_LOOP_MODEL env var value (e.g., "gpt-5.4", "claude-sonnet-4-6").
@@ -39,6 +97,7 @@ func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt stri
 			taskPrompt,
 			"--dangerously-bypass-approvals-and-sandbox",
 			"--skip-git-repo-check",
+			"--json",
 		}
 		if model != "" {
 			args = append(args, "-m", model)
@@ -47,6 +106,8 @@ func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt stri
 
 	case "gemini":
 		args = []string{
+			"--yolo",
+			"-o", "stream-json",
 			"-p", taskPrompt,
 		}
 		if model != "" {
@@ -55,11 +116,13 @@ func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt stri
 		return "gemini", args
 
 	case "opencode":
+		translatedModel := translateOpenCodeModel(model)
 		args = []string{
 			"run", taskPrompt,
+			"--format", "json",
 		}
-		if model != "" {
-			args = append(args, "-m", model)
+		if translatedModel != "" {
+			args = append(args, "-m", translatedModel)
 		}
 		return "opencode", args
 
@@ -105,13 +168,27 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 		}
 	}
 
-	// 2. Build task prompt (reuse existing buildPrompt)
+	// 2. Write instruction file for non-Claude CLIs
+	if cli != "claude" {
+		if writeErr := writeInstructionFile(cli, systemPrompt); writeErr != nil {
+			fmt.Printf("[inner-loop] Warning: failed to write instruction file: %v\n", writeErr)
+		}
+	}
+
+	// 3. Write OpenCode permission config
+	if cli == "opencode" {
+		if writeErr := writeOpenCodePermissionConfig(); writeErr != nil {
+			fmt.Printf("[inner-loop] Warning: failed to write OpenCode permission config: %v\n", writeErr)
+		}
+	}
+
+	// 4. Build task prompt (reuse existing buildPrompt)
 	taskPrompt := buildPrompt(entity, inputs)
 
-	// 3. Build CLI-specific args
+	// 5. Build CLI-specific args
 	cliCommand, cliArgs := buildCliArgs(cli, model, systemPrompt, taskPrompt, "", false)
 
-	// 4. Execute via kindship auth <cli> which injects secrets
+	// 6. Execute via kindship auth <cli> which injects secrets
 	fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
 	cmd := exec.Command("kindship", fullArgs...)
 	cmd.Dir = "/workspace"
@@ -167,13 +244,27 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 		systemPrompt = systemPrompt + "\n\n" + memoryContext
 	}
 
-	// 3. Build task prompt (reuse existing buildPrompt)
+	// 3. Write instruction file for non-Claude CLIs (includes memU context)
+	if cli != "claude" {
+		if writeErr := writeInstructionFile(cli, systemPrompt); writeErr != nil {
+			fmt.Printf("[inner-loop] Warning: failed to write instruction file: %v\n", writeErr)
+		}
+	}
+
+	// 4. Write OpenCode permission config
+	if cli == "opencode" {
+		if writeErr := writeOpenCodePermissionConfig(); writeErr != nil {
+			fmt.Printf("[inner-loop] Warning: failed to write OpenCode permission config: %v\n", writeErr)
+		}
+	}
+
+	// 5. Build task prompt (reuse existing buildPrompt)
 	taskPrompt := buildPrompt(entity, inputs)
 
-	// 4. Build CLI-specific args
+	// 6. Build CLI-specific args
 	cliCommand, cliArgs := buildCliArgs(cli, model, systemPrompt, taskPrompt, sessionID, isResume)
 
-	// 5. Execute via kindship auth <cli> which injects secrets
+	// 7. Execute via kindship auth <cli> which injects secrets
 	fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
 	cmd := exec.Command("kindship", fullArgs...)
 	cmd.Dir = "/workspace"
@@ -204,7 +295,7 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 		}
 	}
 
-	// Only reduce stream-json for Claude (other CLIs don't output this format)
+	// Only reduce stream-json for Claude (other CLIs don't output this format yet)
 	stdout := stdoutBuf.String()
 	if cli == "claude" {
 		stdout = reduceStreamJSONForCompletion(stdout)

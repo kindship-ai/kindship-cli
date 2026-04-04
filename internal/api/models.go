@@ -108,6 +108,7 @@ type ExecutionStartRequest struct {
 	EntityID            string        `json:"entity_id"`
 	ExecutionMode       ExecutionMode `json:"execution_mode"`
 	AgentID             string        `json:"agent_id"`
+	CLI                 string        `json:"cli,omitempty"`
 	OrchestrationMethod string        `json:"orchestration_method,omitempty"`
 	SessionID           string        `json:"session_id,omitempty"`
 	ParentRun           string        `json:"parent_run,omitempty"`
