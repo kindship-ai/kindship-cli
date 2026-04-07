@@ -788,7 +788,7 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("X-Kindship-CLI-Version", Version)
 
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to push files: %w", err)
