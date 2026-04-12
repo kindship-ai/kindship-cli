@@ -28,6 +28,13 @@ func Execute() error {
 }
 
 func init() {
+	// Enable Cobra's built-in `--version` / `-v` flag on the root command.
+	// The existing `kindship version` subcommand in cmd/version.go stays —
+	// this just adds the conventional flag form so users can discover the
+	// version without needing to know about the subcommand.
+	rootCmd.Version = Version
+	rootCmd.SetVersionTemplate("kindship version {{.Version}}\n")
+
 	// Container commands
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(runCmd)
