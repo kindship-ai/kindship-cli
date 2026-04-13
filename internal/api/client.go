@@ -676,7 +676,7 @@ func (c *Client) ActivateEntity(entityID, serviceKey string, recursive bool) (*A
 
 // RecoverRuns reconciles RUNNING runs after container restart.
 // ORCHESTRATE runs are returned as resumed runs, leaf runs may be returned as
-// resumable descriptors, and ASK_USER runs are skipped.
+// resumable descriptors.
 func (c *Client) RecoverRuns(agentID, serviceKey string) (*RecoverRunsResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/cli/agent/recover-runs", c.baseURL)
 	c.log("Recovering runs for agent: %s", agentID)
@@ -724,11 +724,10 @@ func (c *Client) RecoverRuns(agentID, serviceKey string) (*RecoverRunsResponse, 
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	c.log("Run reconciliation: %d resumed, %d resumable, %d failed, %d skipped (ASK_USER)",
+	c.log("Run reconciliation: %d resumed, %d resumable, %d failed",
 		len(recoverResp.ResumedRuns),
 		len(recoverResp.ResumableRuns),
-		recoverResp.FailedCount,
-		recoverResp.SkippedAskUser)
+		recoverResp.FailedCount)
 	return &recoverResp, nil
 }
 

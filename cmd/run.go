@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -24,10 +23,6 @@ var (
 	sessionID  string
 	resume     bool
 )
-
-// ErrAskUserSkipped is returned when an ASK_USER task is started but not
-// blocked on — the loop should move to the next task.
-var ErrAskUserSkipped = errors.New("ASK_USER task started, awaiting user response")
 
 var runCmd = &cobra.Command{
 	Use:   "run [entity-id]",
@@ -128,10 +123,6 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	})
 
 	if err != nil {
-		if errors.Is(err, ErrAskUserSkipped) {
-			log.Info("ASK_USER task started, awaiting user response via UI")
-			return nil
-		}
 		return err
 	}
 
@@ -158,7 +149,6 @@ type EntityExecutionParams struct {
 // executeEntity runs the full execution lifecycle for a single entity.
 // Returns (true, nil) on success, (false, nil) on execution failure (non-zero exit),
 // and (false, err) on infrastructure errors.
-// Returns (false, ErrAskUserSkipped) for ASK_USER mode tasks.
 func executeEntity(params EntityExecutionParams) (bool, error) {
 	startTime := time.Now()
 	log := params.Log
@@ -252,18 +242,6 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	})
 
 	executionID := startResp.ExecutionID
-
-	// ASK_USER / CHOICE / CALL_TO_ACTION: create the run (RUNNING) but don't block — user responds via UI
-	if entityResp.Entity.ExecutionMode == api.ExecutionModeAskUser ||
-		entityResp.Entity.ExecutionMode == api.ExecutionModeChoice ||
-		entityResp.Entity.ExecutionMode == api.ExecutionModeCallToAction {
-		log.Info("Interactive task started, not blocking", map[string]interface{}{
-			"execution_id": executionID,
-			"entity_id":    params.EntityID,
-			"mode":         entityResp.Entity.ExecutionMode,
-		})
-		return false, ErrAskUserSkipped
-	}
 
 	// Step 4: Execute based on execution mode
 	log.Info("Executing entity", map[string]interface{}{
@@ -544,7 +522,7 @@ func orchestrateChildren(entityID, runID, sessionID string, client *api.Client, 
 
 	// Max cumulative time spent waiting with pending-but-no-runnable tasks
 	// before giving up. Prevents infinite polling when children are stuck
-	// (e.g., blocked deps that will never resolve, stale ASK_USER).
+	// (e.g., blocked deps that will never resolve).
 	const maxIdleWait = 30 * time.Minute
 	idleStart := time.Time{}
 
@@ -588,7 +566,7 @@ func orchestrateChildren(entityID, runID, sessionID string, client *api.Client, 
 					break
 				}
 
-				// Tasks are pending (blocked deps, ASK_USER waiting, etc.) — backoff and retry
+				// Tasks are pending (blocked deps, etc.) — backoff and retry
 				log.Info("No runnable tasks but children pending, waiting", map[string]interface{}{
 					"pending_count":  nextResp.PendingCount,
 					"tasks_executed": tasksExecuted,
@@ -637,13 +615,6 @@ func orchestrateChildren(entityID, runID, sessionID string, client *api.Client, 
 		})
 
 		if err != nil {
-			if errors.Is(err, ErrAskUserSkipped) {
-				// ASK_USER started — pending_count will keep loop alive
-				log.Info("ASK_USER task started within orchestration", map[string]interface{}{
-					"task_id": nextResp.Task.ID,
-				})
-				continue
-			}
 			// Retry-aware behavior: keep polling until queue drains.
 			log.Error("Child task execution returned error; continuing orchestration loop", err, map[string]interface{}{
 				"task_id": nextResp.Task.ID,

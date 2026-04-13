@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -114,10 +113,9 @@ func runLoop(cmd *cobra.Command, args []string) error {
 		// Non-fatal — continue loop startup
 	} else {
 		log.Info("Run recovery complete", map[string]interface{}{
-			"resumed_count":    len(recoverResp.ResumedRuns),
-			"resumable_count":  len(recoverResp.ResumableRuns),
-			"failed_count":     recoverResp.FailedCount,
-			"skipped_ask_user": recoverResp.SkippedAskUser,
+			"resumed_count":   len(recoverResp.ResumedRuns),
+			"resumable_count": len(recoverResp.ResumableRuns),
+			"failed_count":    recoverResp.FailedCount,
 		})
 
 		// Resume ORCHESTRATE runs in background goroutines
@@ -145,11 +143,6 @@ func runLoop(cmd *cobra.Command, args []string) error {
 		// Resume leaf runs returned by reconciliation (non-destructive startup).
 		for _, resumable := range recoverResp.ResumableRuns {
 			if resumable.ExecutionMode == string(api.ExecutionModeOrchestrate) {
-				continue
-			}
-			if resumable.ExecutionMode == "ASK_USER" ||
-				resumable.ExecutionMode == "CHOICE" ||
-				resumable.ExecutionMode == "CALL_TO_ACTION" {
 				continue
 			}
 
@@ -255,15 +248,9 @@ func runLoop(cmd *cobra.Command, args []string) error {
 		})
 
 		if err != nil {
-			if errors.Is(err, ErrAskUserSkipped) {
-				log.Info("ASK_USER task started, continuing to next task", map[string]interface{}{
-					"task_id": task.ID,
-				})
-			} else {
-				log.Error("Task execution error", err, map[string]interface{}{
-					"task_id": task.ID,
-				})
-			}
+			log.Error("Task execution error", err, map[string]interface{}{
+				"task_id": task.ID,
+			})
 			// Don't exit — continue loop
 		} else {
 			log.Info("Task completed", map[string]interface{}{

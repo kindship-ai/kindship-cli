@@ -318,13 +318,6 @@ func formatKindshipTaskMarkdown(agentSlug string, task *api.TaskInfo, runID stri
 		}
 	}
 
-	// For interactive modes, keep the prompt user-facing.
-	switch api.ExecutionMode(task.ExecutionMode) {
-	case api.ExecutionModeAskUser, api.ExecutionModeChoice, api.ExecutionModeCallToAction:
-		b.WriteString("### Next Step\n")
-		b.WriteString("This is an interactive task. Provide the requested information and proceed.\n\n")
-	}
-
 	b.WriteString("### Instructions\n")
 	b.WriteString("- Work on this task in the current repository\n")
 	b.WriteString("- When complete, use `/kindship complete` to report success\n")

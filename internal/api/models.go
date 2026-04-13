@@ -11,10 +11,7 @@ const (
 	ExecutionModeHybrid        ExecutionMode = "HYBRID"
 	ExecutionModeBash          ExecutionMode = "BASH"
 	ExecutionModePython        ExecutionMode = "PYTHON"
-	ExecutionModeAskUser       ExecutionMode = "ASK_USER"
 	ExecutionModeOrchestrate   ExecutionMode = "ORCHESTRATE"
-	ExecutionModeChoice        ExecutionMode = "CHOICE"
-	ExecutionModeCallToAction  ExecutionMode = "CALL_TO_ACTION"
 	ExecutionModeAgent         ExecutionMode = "AGENT"
 )
 
@@ -239,9 +236,8 @@ type RecoverRunsResponse struct {
 	ResumableRuns []ResumedRun `json:"resumable_runs,omitempty"`
 	// FailedCount is retained for backward compatibility.
 	// In reconciliation-first mode this is expected to remain 0.
-	FailedCount    int    `json:"failed_count"`
-	SkippedAskUser int    `json:"skipped_ask_user"`
-	Error          string `json:"error,omitempty"`
+	FailedCount int    `json:"failed_count"`
+	Error       string `json:"error,omitempty"`
 }
 
 // ActiveRunResponse is the response from the active-run endpoint
