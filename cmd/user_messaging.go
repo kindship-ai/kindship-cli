@@ -23,17 +23,21 @@ var userMessagingCmd = &cobra.Command{
 	Use:     "user-messaging",
 	Aliases: []string{"um"},
 	Short:   "Send messages to the user (ask, choice, approve, report)",
-	Long: `User Messaging is how the agent communicates with the user: asking
-questions, proposing choices, requesting approval, and reporting results.
+	Long: `User Messaging is how you — the agent — communicate with the user:
+asking questions, proposing choices, requesting approval, and reporting
+results.
 
-Every message is tagged with an agency (one of 12 canonical categories or
-'other'). If the user has set an agency to 'silent', the CLI rejects the
-message and tells you to operate fully autonomously within that agency —
-treat that rejection as an instruction, not an error.
+Every message is tagged with one of your 12 agencies (or 'other'). The
+agencies are YOUR domains of autonomy; the user configures an oversight
+level on each (silent / report / approval). If the user has set an agency
+to 'silent' they are telling you to operate fully autonomously in that
+area — the CLI will refuse to deliver a silent-tagged message and return
+{"suppressed": true, ...}. Treat that refusal as an instruction, not an
+error.
 
-Agents must NEVER block waiting for answers. Send, keep working, check back
-later via 'status' or 'list'. Messages do not expire by default so the user
-can answer days later.
+Agents must NEVER block waiting for answers. Send, keep working, check
+back later via 'status' or 'list'. Messages do not expire by default so
+the user can answer days later.
 
 Subcommands:
   ask        Ask a free-text question
@@ -44,7 +48,7 @@ Subcommands:
   list       List messages for the current agent
   remind     Nudge a pending message (push a fresh notification)
   retract    Cancel a pending message (still in DB, hidden from inbox)
-  agencies   List agencies + current oversight level`,
+  agencies   List your agencies and the user's oversight over each`,
 }
 
 // ---- shared flags ----
@@ -416,8 +420,18 @@ func postUserMessagingIDAction(action, id string) error {
 
 var userMessagingAgenciesCmd = &cobra.Command{
 	Use:   "agencies",
-	Short: "List agencies + current oversight level",
-	RunE:  runUserMessagingAgencies,
+	Short: "List your agencies and the user's oversight over each",
+	Long: `List your 12 agencies (plus 'other') and the oversight level the user
+has configured on each.
+
+The agencies are YOUR domains of autonomy — they describe how you work,
+not permissions the user granted. The user only configures oversight:
+ - silent   : you have full authority here; the user does not want to be
+              involved. The CLI refuses to deliver messages tagged with
+              a silent agency.
+ - report   : you can act but keep the user informed.
+ - approval : ask before acting (conservative default for unset agencies).`,
+	RunE: runUserMessagingAgencies,
 }
 
 func runUserMessagingAgencies(_ *cobra.Command, _ []string) error {
@@ -511,7 +525,7 @@ func init() {
 		userMessagingApproveCmd,
 		userMessagingReportCmd,
 	} {
-		c.Flags().StringVar(&umAgency, "agency", "", "Agency tag (one of 12 canonical + 'other')")
+		c.Flags().StringVar(&umAgency, "agency", "", "One of your 12 agencies (or 'other') — the agent's domain of autonomy this message belongs to")
 		c.Flags().StringVar(&umTitle, "title", "", "Optional short title")
 		c.Flags().StringVar(&umExpiresIn, "expires-in", "", "Optional expiry (e.g. 30m, 2h, 7d) — default is no expiry")
 		c.Flags().BoolVar(&umJSON, "json", false, "JSON output")
