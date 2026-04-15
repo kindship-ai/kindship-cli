@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 )
 
 // User Messaging — agent → user channel with agency tagging. See
-// /Users/Testsson/.claude/plans/validated-watching-platypus.md.
+// /Users/Testsson/.claude/plans/snazzy-leaping-stonebraker.md.
 
 var userMessagingCmd = &cobra.Command{
 	Use:     "user-messaging",
@@ -48,20 +49,25 @@ Subcommands:
   list       List messages for the current agent
   remind     Nudge a pending message (push a fresh notification)
   retract    Cancel a pending message (still in DB, hidden from inbox)
+  dispose    Mark an answered/acknowledged/expired message as reviewed
   agencies   List your agencies and the user's oversight over each`,
 }
 
 // ---- shared flags ----
 
 var (
-	umAgency        string
-	umTitle         string
-	umJSON          bool
-	umChoiceOption  []string // --option "value:label"
-	umExpiresIn     string   // parsed as duration (e.g. "30m", "2h", "7d")
-	umListStatus    string
-	umListAgency    string
-	umListLimit     int
+	umAgency              string
+	umTitle               string
+	umJSON                bool
+	umChoiceOption        []string // --option "value:label"
+	umExpiresIn           string   // parsed as duration (e.g. "30m", "2h", "7d")
+	umListStatus          string
+	umListAgency          string
+	umListLimit           int
+	umListIncludeFixtures bool
+	umListIncludeDisposed bool
+	umDisposeCode         string
+	umDisposeNote         string
 )
 
 // ---- ask ----
@@ -315,6 +321,12 @@ func runUserMessagingList(_ *cobra.Command, _ []string) error {
 	if umListLimit > 0 {
 		q.Set("limit", strconv.Itoa(umListLimit))
 	}
+	if umListIncludeFixtures {
+		q.Set("include_fixtures", "1")
+	}
+	if umListIncludeDisposed {
+		q.Set("include_disposed", "1")
+	}
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
@@ -413,6 +425,96 @@ func postUserMessagingIDAction(action, id string) error {
 		return nil
 	}
 	fmt.Printf("✓ %s: %s\n", action, id)
+	return nil
+}
+
+// ---- dispose ----
+
+var userMessagingDisposeCmd = &cobra.Command{
+	Use:   "dispose <id>",
+	Short: "Mark an answered/acknowledged/expired message as reviewed (buries it from default scans)",
+	Long: `Dispose marks a resolved user message as "reviewed and buried" so it
+stops surfacing in default 'list' output on future heartbeats. Typical
+uses: clearing a smoke-test fixture, burying an answered thread whose
+reply has been acted on, tagging a row as handled-elsewhere.
+
+Dispose is only valid for rows with status answered, acknowledged, or
+expired. Pending rows use 'retract' instead; retracted rows are already
+terminal. Re-disposing an already-disposed row is a no-op that returns
+409 so double-dispose bugs are visible.
+
+Use --include-disposed on 'list' to see buried rows.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runUserMessagingDispose,
+}
+
+func runUserMessagingDispose(_ *cobra.Command, args []string) error {
+	if umDisposeCode == "" {
+		return fmt.Errorf("--code is required (e.g. smoke-test-fixture, obsolete, handled-elsewhere)")
+	}
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+	reqBody := api.UserMessagingDisposeRequest{
+		ID:   args[0],
+		Code: umDisposeCode,
+		Note: umDisposeNote,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest(
+		http.MethodPost,
+		fmt.Sprintf("%s/api/cli/user-messaging/dispose", ctx.APIBaseURL),
+		bytes.NewBuffer(body),
+	)
+	if err != nil {
+		return err
+	}
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	respBody, statusCode, err := doUserMessagingHTTP(req)
+	if err != nil {
+		return err
+	}
+
+	var out api.UserMessagingDisposeResponse
+	// Parse JSON even on error paths — the server returns structured
+	// error bodies for 404/409/500 that carry useful detail (status,
+	// disposedAt) beyond the generic message.
+	_ = json.Unmarshal(respBody, &out)
+
+	if umJSON {
+		// Keep stdout clean JSON. On error, signal failure via exit code
+		// instead of returning to Cobra, which would add a non-JSON
+		// "Error: ..." line on stderr.
+		fmt.Println(string(respBody))
+		if statusCode >= 400 {
+			os.Exit(1)
+		}
+		return nil
+	}
+
+	if statusCode >= 400 {
+		msg := out.Error
+		if msg == "" {
+			msg = strings.TrimSpace(string(respBody))
+		}
+		// Surface the structured detail fields the server returns on
+		// 409s so operators see *which* row blocked them.
+		if out.DisposedAt != nil && *out.DisposedAt != "" {
+			msg = fmt.Sprintf("%s (already disposed at %s)", msg, *out.DisposedAt)
+		}
+		if out.Status != "" {
+			msg = fmt.Sprintf("%s (current status: %s)", msg, out.Status)
+		}
+		return fmt.Errorf("dispose failed (%d): %s", statusCode, msg)
+	}
+	fmt.Printf("✓ disposed: %s (code=%s)\n", args[0], umDisposeCode)
 	return nil
 }
 
@@ -537,8 +639,13 @@ func init() {
 	userMessagingListCmd.Flags().StringVar(&umListAgency, "agency", "", "Filter by agency")
 	userMessagingListCmd.Flags().IntVar(&umListLimit, "limit", 50, "Max items")
 	userMessagingListCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
+	userMessagingListCmd.Flags().BoolVar(&umListIncludeFixtures, "include-fixtures", false, "Include smoke-test/synthetic fixture rows (default: excluded)")
+	userMessagingListCmd.Flags().BoolVar(&umListIncludeDisposed, "include-disposed", false, "Include rows previously disposed via 'dispose' (default: excluded)")
 	userMessagingRemindCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	userMessagingRetractCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
+	userMessagingDisposeCmd.Flags().StringVar(&umDisposeCode, "code", "", "Machine label for the disposition (e.g. smoke-test-fixture, obsolete, handled-elsewhere) — required")
+	userMessagingDisposeCmd.Flags().StringVar(&umDisposeNote, "note", "", "Optional human-readable reason")
+	userMessagingDisposeCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	userMessagingAgenciesCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 
 	userMessagingCmd.AddCommand(
@@ -550,6 +657,7 @@ func init() {
 		userMessagingListCmd,
 		userMessagingRemindCmd,
 		userMessagingRetractCmd,
+		userMessagingDisposeCmd,
 		userMessagingAgenciesCmd,
 	)
 	rootCmd.AddCommand(userMessagingCmd)

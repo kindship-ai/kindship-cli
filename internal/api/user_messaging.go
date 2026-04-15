@@ -2,7 +2,7 @@ package api
 
 // User Messaging — first-class agent → user channel.
 //
-// See /Users/Testsson/.claude/plans/validated-watching-platypus.md.
+// See /Users/Testsson/.claude/plans/snazzy-leaping-stonebraker.md.
 // Backend lives in the kindship-vercel repo under apps/web/app/api/cli/user-messaging/.
 
 type UserMessageChoice struct {
@@ -35,6 +35,24 @@ type UserMessage struct {
 	ReminderCount   int                 `json:"reminder_count"`
 	RunID           *string             `json:"run_id"`
 	ParentEntityID  *string             `json:"parent_entity_id"`
+	IsTestFixture   bool                `json:"is_test_fixture"`
+	DisposedAt      *string             `json:"disposed_at"`
+	DispositionCode *string             `json:"disposition_code"`
+	DispositionNote *string             `json:"disposition_note"`
+}
+
+type UserMessagingDisposeRequest struct {
+	ID   string `json:"id"`
+	Code string `json:"code"`
+	Note string `json:"note,omitempty"`
+}
+
+type UserMessagingDisposeResponse struct {
+	Ok         bool         `json:"ok"`
+	Row        *UserMessage `json:"row,omitempty"`
+	Status     string       `json:"status,omitempty"`
+	DisposedAt *string      `json:"disposedAt,omitempty"`
+	Error      string       `json:"error,omitempty"`
 }
 
 type UserMessagingSendRequest struct {
