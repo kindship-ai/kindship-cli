@@ -79,10 +79,31 @@ var sitePushCmd = &cobra.Command{
 Automatically excludes .git/, node_modules/, .env*, *.pem, *.key,
 and .woodpecker.yml. Enforces max 50MB compressed and 1000 files.
 
+Use --only to deploy a targeted subset of files from a dirty worktree.
+With --only, 'push' clones the last committed tree (HEAD) into a temp
+dir, overlays just the matching file(s) from the worktree on top, and
+pushes the full overlay — the archive shape is still the whole site
+so the server's full-replace behavior does not wipe files that existed
+in HEAD.
+
+Caveats for --only:
+  * Files present on the remote only because a previous --only push
+    overlaid an untracked file — and now not matched by this run's
+    patterns — will disappear, because the overlay is rebuilt from
+    HEAD each time. Commit untracked files before relying on them
+    across multiple --only pushes.
+  * Each --only pattern must match at least one file (literal path or
+    single-segment glob like '*.html'); zero matches fails fast.
+  * Files matching push exclusions (.git, node_modules, .woodpecker.yml,
+    .env*, *.pem, *.key) cannot be shipped via --only — the overlay
+    step rejects the pattern rather than silently dropping it later.
+
 Examples:
   kindship site push my-app
   kindship site push my-app --message "Initial deploy"
-  kindship site push my-app --dir ./my-app`,
+  kindship site push my-app --dir ./my-app
+  kindship site push my-app --only index.html --only about.html
+  kindship site push my-app --only 'blog/2026-*.html'`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSitePush,
 }
@@ -199,6 +220,7 @@ var (
 	siteFormat  string
 	pushDir     string
 	pushMessage string
+	pushOnly    []string
 	logsBuild   int
 )
 
@@ -214,6 +236,7 @@ func init() {
 	sitePushCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	sitePushCmd.Flags().StringVar(&pushDir, "dir", "", "Directory to upload (defaults to the canonical site workspace)")
 	sitePushCmd.Flags().StringVar(&pushMessage, "message", "Deploy from agent", "Commit message")
+	sitePushCmd.Flags().StringArrayVar(&pushOnly, "only", nil, "Clone HEAD into a temp dir, overlay only the matching file(s) from the worktree, and push the overlay. Repeatable. Requires at least one commit on the site repo.")
 
 	siteLogsCmd.Flags().IntVar(&logsBuild, "build", 0, "Build number (default: latest)")
 
@@ -381,6 +404,223 @@ func requireLocalSiteWorkspaceRepo(dir string) error {
 	}
 
 	return nil
+}
+
+// buildOverlayFromHEAD creates a temp directory containing a snapshot
+// of the last committed tree (HEAD) overlaid with files from the
+// worktree that match the given glob patterns. Caller must remove the
+// returned directory when done.
+//
+// This is the implementation for `site push --only`. The intent is to
+// deploy a targeted subset of files from a dirty worktree without
+// shipping unrelated uncommitted state — the archive shape stays
+// "full site" so the server-side full-replace push does not wipe
+// remote files that the overlay does not cover.
+//
+// Semantics:
+//   - HEAD must exist. `site create` initializes a repo but doesn't
+//     commit, so a fresh site with no commits cannot use --only;
+//     we fail fast with a clear error pointing at the fix.
+//   - Each pattern is matched against the worktree (relative paths).
+//     Matching files are copied over the HEAD snapshot. Untracked
+//     files are included. Files deleted in the worktree but still
+//     present in HEAD survive — --only is additive, it cannot remove
+//     files from the remote.
+//   - If no pattern matches any file, we fail fast rather than push
+//     an unmodified HEAD snapshot (which would be surprising).
+func buildOverlayFromHEAD(repoDir string, patterns []string) (string, error) {
+	// 1. Verify HEAD exists.
+	rev := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "HEAD")
+	if out, err := rev.CombinedOutput(); err != nil {
+		return "", fmt.Errorf(
+			"--only requires at least one commit on the site repo at %s, "+
+				"but HEAD does not resolve (%s). Commit once and retry, "+
+				"or omit --only to push the current worktree directly.",
+			repoDir, strings.TrimSpace(string(out)),
+		)
+	}
+
+	// 2. Create temp overlay directory.
+	overlayDir, err := os.MkdirTemp("", "kindship-site-only-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create overlay temp dir: %w", err)
+	}
+	// On any error below, clean up before returning.
+	cleanup := func() { _ = os.RemoveAll(overlayDir) }
+
+	// 3. Extract HEAD tree into the overlay via `git archive | tar -x`.
+	archive := exec.Command("git", "-C", repoDir, "archive", "HEAD")
+	untar := exec.Command("tar", "-x", "-C", overlayDir)
+	pipe, err := archive.StdoutPipe()
+	if err != nil {
+		cleanup()
+		return "", fmt.Errorf("failed to pipe git archive: %w", err)
+	}
+	untar.Stdin = pipe
+	untar.Stderr = os.Stderr
+	archive.Stderr = os.Stderr
+	if err := untar.Start(); err != nil {
+		cleanup()
+		return "", fmt.Errorf("failed to start tar extract: %w", err)
+	}
+	if err := archive.Run(); err != nil {
+		_ = untar.Wait()
+		cleanup()
+		return "", fmt.Errorf("git archive HEAD failed: %w", err)
+	}
+	if err := untar.Wait(); err != nil {
+		cleanup()
+		return "", fmt.Errorf("tar extract failed: %w", err)
+	}
+
+	// 4. Overlay matching files from the worktree. We walk the worktree
+	// once so patterns can match nested paths (single-segment globs via
+	// filepath.Match). Rejection rules:
+	//   - Files matching the archive exclude list (skipPatterns /
+	//     skipExtensions / .env*) are rejected at overlay time so the
+	//     operator sees a clear error instead of a "Pushed N files"
+	//     success that silently drops the requested file.
+	//   - Each pattern must match at least one non-excluded file. A
+	//     glob that matches zero files is almost always a typo, so we
+	//     fail the entire push.
+	perPatternMatches := make(map[string]int, len(patterns))
+	var excludedMatches []string
+	walkErr := filepath.Walk(repoDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(repoDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		// Skip symlinks and non-regular files — createArchive drops
+		// these too, so --only should not smuggle them in.
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil
+		}
+		// Evaluate every pattern against this file and count all
+		// matches. A file matched by multiple patterns credits all of
+		// them — otherwise overlapping patterns like --only '*.html'
+		// --only index.html would false-fail zero-match on the
+		// narrower one.
+		anyMatch := false
+		for _, pat := range patterns {
+			ok, matchErr := filepath.Match(pat, rel)
+			if matchErr != nil {
+				return fmt.Errorf("invalid --only pattern %q: %w", pat, matchErr)
+			}
+			if !ok {
+				continue
+			}
+			perPatternMatches[pat]++
+			anyMatch = true
+		}
+		if !anyMatch {
+			return nil
+		}
+		if isExcludedFromArchive(rel) {
+			excludedMatches = append(excludedMatches, rel)
+			return nil
+		}
+		dst := filepath.Join(overlayDir, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("failed to create overlay dir for %s: %w", rel, err)
+		}
+		if err := copyFileOverwrite(path, dst); err != nil {
+			return fmt.Errorf("failed to overlay %s: %w", rel, err)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		cleanup()
+		return "", walkErr
+	}
+
+	// Reject excluded files before reporting unmatched patterns — a
+	// single bad match is enough to stop the push.
+	if len(excludedMatches) > 0 {
+		cleanup()
+		return "", fmt.Errorf(
+			"--only cannot ship files excluded from the push archive "+
+				"(.git, node_modules, .woodpecker.yml, .env*, *.pem, *.key): %s",
+			strings.Join(excludedMatches, ", "),
+		)
+	}
+
+	// 5. Every pattern must match at least one file. A pattern that
+	// matched nothing is almost always a typo, and ignoring it would
+	// silently ship a subset of what the operator requested.
+	var unmatched []string
+	for _, pat := range patterns {
+		if perPatternMatches[pat] == 0 {
+			unmatched = append(unmatched, pat)
+		}
+	}
+	if len(unmatched) > 0 {
+		cleanup()
+		return "", fmt.Errorf(
+			"--only pattern(s) matched zero files in %s: %s",
+			repoDir, strings.Join(unmatched, ", "),
+		)
+	}
+
+	return overlayDir, nil
+}
+
+// isExcludedFromArchive mirrors the exclusion rules in createArchive.
+// Kept in sync with skipPatterns, skipExtensions, and the .env*
+// prefix skip so --only rejects an excluded file at overlay time
+// rather than letting the archiver drop it silently.
+func isExcludedFromArchive(rel string) bool {
+	for _, pat := range skipPatterns {
+		if matchesPattern(rel, pat) {
+			return true
+		}
+	}
+	base := filepath.Base(rel)
+	if strings.HasPrefix(base, ".env") {
+		return true
+	}
+	for _, ext := range skipExtensions {
+		if strings.HasSuffix(base, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyFileOverwrite copies src to dst, replacing dst if it exists.
+func copyFileOverwrite(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func workspaceHasUserFiles(dir string) (bool, error) {
@@ -751,8 +991,21 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Source directory to archive. With --only, we build an overlay tree
+	// (HEAD snapshot + selected worktree files) in a temp dir and point
+	// the archiver at that instead of the dirty worktree.
+	sourceDir := dir
+	if len(pushOnly) > 0 {
+		overlayDir, err := buildOverlayFromHEAD(dir, pushOnly)
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(overlayDir)
+		sourceDir = overlayDir
+	}
+
 	// Create tar.gz archive in memory
-	archiveBuf, fileCount, err := createArchive(dir)
+	archiveBuf, fileCount, err := createArchive(sourceDir)
 	if err != nil {
 		return err
 	}
