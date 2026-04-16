@@ -61,6 +61,9 @@ var (
 	umJSON                bool
 	umChoiceOption        []string // --option "value:label"
 	umExpiresIn           string   // parsed as duration (e.g. "30m", "2h", "7d")
+	umUrgency             string   // ambient | daily | urgent | critical
+	umTldr                string   // ≤140-char subject
+	umOnAnswer            string   // ≤2KB self-reminder for context-free pickup
 	umListStatus          string
 	umListAgency          string
 	umListLimit           int
@@ -81,10 +84,13 @@ var userMessagingAskCmd = &cobra.Command{
 
 func runUserMessagingAsk(_ *cobra.Command, args []string) error {
 	return sendUserMessage(api.UserMessagingSendRequest{
-		Type:   "question",
-		Agency: umAgency,
-		Body:   strings.Join(args, " "),
-		Title:  umTitle,
+		Type:         "question",
+		Agency:       umAgency,
+		Body:         strings.Join(args, " "),
+		Title:        umTitle,
+		Urgency:      umUrgency,
+		Tldr:         umTldr,
+		OnAnswerNote: umOnAnswer,
 	})
 }
 
@@ -110,11 +116,14 @@ func runUserMessagingChoice(_ *cobra.Command, args []string) error {
 		choices = append(choices, api.UserMessageChoice{Value: parts[0], Label: parts[1]})
 	}
 	return sendUserMessage(api.UserMessagingSendRequest{
-		Type:    "choice",
-		Agency:  umAgency,
-		Body:    strings.Join(args, " "),
-		Title:   umTitle,
-		Choices: choices,
+		Type:         "choice",
+		Agency:       umAgency,
+		Body:         strings.Join(args, " "),
+		Title:        umTitle,
+		Choices:      choices,
+		Urgency:      umUrgency,
+		Tldr:         umTldr,
+		OnAnswerNote: umOnAnswer,
 	})
 }
 
@@ -129,10 +138,13 @@ var userMessagingApproveCmd = &cobra.Command{
 
 func runUserMessagingApprove(_ *cobra.Command, args []string) error {
 	return sendUserMessage(api.UserMessagingSendRequest{
-		Type:   "approval",
-		Agency: umAgency,
-		Body:   strings.Join(args, " "),
-		Title:  umTitle,
+		Type:         "approval",
+		Agency:       umAgency,
+		Body:         strings.Join(args, " "),
+		Title:        umTitle,
+		Urgency:      umUrgency,
+		Tldr:         umTldr,
+		OnAnswerNote: umOnAnswer,
 	})
 }
 
@@ -147,10 +159,13 @@ var userMessagingReportCmd = &cobra.Command{
 
 func runUserMessagingReport(_ *cobra.Command, args []string) error {
 	return sendUserMessage(api.UserMessagingSendRequest{
-		Type:   "report",
-		Agency: umAgency,
-		Body:   strings.Join(args, " "),
-		Title:  umTitle,
+		Type:         "report",
+		Agency:       umAgency,
+		Body:         strings.Join(args, " "),
+		Title:        umTitle,
+		Urgency:      umUrgency,
+		Tldr:         umTldr,
+		OnAnswerNote: umOnAnswer,
 	})
 }
 
@@ -222,7 +237,21 @@ func sendUserMessage(req api.UserMessagingSendRequest) error {
 	if out.ID != nil {
 		id = *out.ID
 	}
-	fmt.Printf("✓ Sent (%s): %s\n", req.Type, id)
+	// Surface delivery policy so agents learn the cadence contract. In Phase B
+	// this is always 'push_now'; Phase C introduces deferred/bundled/wake
+	// variants that callers MUST trust (don't re-send if delivery is in the
+	// future).
+	policy := out.DeliveryPolicy
+	if policy == "" {
+		policy = "push_now"
+	}
+	suffix := ""
+	if out.EstimatedDeliveryAt != nil && *out.EstimatedDeliveryAt != "" {
+		suffix = fmt.Sprintf(" → %s at %s", policy, *out.EstimatedDeliveryAt)
+	} else {
+		suffix = fmt.Sprintf(" → %s", policy)
+	}
+	fmt.Printf("✓ Sent (%s): %s%s\n", req.Type, id, suffix)
 	return nil
 }
 
@@ -356,14 +385,33 @@ func runUserMessagingList(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 	for _, m := range out.Items {
-		title := m.Body
-		if m.Title != nil && *m.Title != "" {
-			title = *m.Title
+		// Subject priority for the list view mirrors the server's
+		// notification priority: tldr → title → body.
+		subject := m.Body
+		if m.Tldr != nil && *m.Tldr != "" {
+			subject = *m.Tldr
+		} else if m.Title != nil && *m.Title != "" {
+			subject = *m.Title
 		}
-		if len(title) > 60 {
-			title = title[:57] + "..."
+		if len(subject) > 60 {
+			subject = subject[:57] + "..."
 		}
-		fmt.Printf("%s  %-11s %-12s %-6s  %s\n", m.ID, m.Status, m.Agency, m.Type, title)
+		urgency := m.Urgency
+		if urgency == "" {
+			urgency = "daily" // server default; older rows may omit
+		}
+		// Plan requires one-line format with urgency + tldr + on_answer_note
+		// inline. on-answer is appended to the same row when present so a
+		// heartbeat scan sees the resume cue at a glance without a second line.
+		line := fmt.Sprintf("%s  %-11s %-9s %-12s %-6s  %s", m.ID, m.Status, urgency, m.Agency, m.Type, subject)
+		if m.OnAnswerNote != nil && *m.OnAnswerNote != "" {
+			note := *m.OnAnswerNote
+			if len(note) > 80 {
+				note = note[:77] + "..."
+			}
+			line += fmt.Sprintf("  ⟵ on-answer: %s", note)
+		}
+		fmt.Println(line)
 	}
 	return nil
 }
@@ -630,6 +678,9 @@ func init() {
 		c.Flags().StringVar(&umAgency, "agency", "", "One of your 12 agencies (or 'other') — the agent's domain of autonomy this message belongs to")
 		c.Flags().StringVar(&umTitle, "title", "", "Optional short title")
 		c.Flags().StringVar(&umExpiresIn, "expires-in", "", "Optional expiry (e.g. 30m, 2h, 7d) — default is no expiry")
+		c.Flags().StringVar(&umUrgency, "urgency", "", "Urgency label: ambient | daily (default) | urgent | critical. Phase B: metadata + push subject only. Phase C: routing (bundled daily dispatch, quiet-hours hold, wake-override).")
+		c.Flags().StringVar(&umTldr, "tldr", "", "Optional ≤140-char subject. Used as the push/email/telegram subject and the web card heading. Falls back to title, then body snippet.")
+		c.Flags().StringVar(&umOnAnswer, "on-answer", "", "Optional self-reminder (≤2KB) surfaced alongside the answered row on your next heartbeat so you can resume context-free. Cue format suggestion: 'resume <ROADMAP item> / reread <file> / follow up with <…>'.")
 		c.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	}
 	userMessagingChoiceCmd.Flags().StringArrayVar(&umChoiceOption, "option", nil, "--option value:label (repeatable; minimum 2)")

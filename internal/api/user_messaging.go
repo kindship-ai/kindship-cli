@@ -39,6 +39,11 @@ type UserMessage struct {
 	DisposedAt      *string             `json:"disposed_at"`
 	DispositionCode *string             `json:"disposition_code"`
 	DispositionNote *string             `json:"disposition_note"`
+	// Phase B engagement fields. Server default for Urgency is 'daily';
+	// older servers may omit the field entirely.
+	Urgency      string  `json:"urgency,omitempty"`
+	Tldr         *string `json:"tldr,omitempty"`
+	OnAnswerNote *string `json:"on_answer_note,omitempty"`
 }
 
 type UserMessagingDisposeRequest struct {
@@ -65,6 +70,13 @@ type UserMessagingSendRequest struct {
 	ExpiresInSeconds int                 `json:"expires_in_seconds,omitempty"`
 	RunID            string              `json:"run_id,omitempty"`
 	ParentEntityID   string              `json:"parent_entity_id,omitempty"`
+	// Phase B engagement fields. All optional; server defaults Urgency to
+	// 'daily' when omitted. Tldr caps at 140 chars server-side, OnAnswerNote
+	// at 2048 chars. Sent as strings here — zero-value strings get dropped
+	// via omitempty so older server versions tolerate the request.
+	Urgency      string `json:"urgency,omitempty"` // ambient | daily | urgent | critical
+	Tldr         string `json:"tldr,omitempty"`
+	OnAnswerNote string `json:"on_answer_note,omitempty"`
 }
 
 type UserMessagingSendResponse struct {
@@ -75,6 +87,14 @@ type UserMessagingSendResponse struct {
 	Reason     string  `json:"reason,omitempty"`
 	Agency     string  `json:"agency,omitempty"`
 	Error      string  `json:"error,omitempty"`
+	// Phase B response fields. Urgency echoes the send request's value (or
+	// 'daily' default). DeliveryPolicy is stub 'push_now' in Phase B and
+	// gains real routing values in Phase C ('push_now' | 'deferred_push' |
+	// 'bundled' | 'wake_override' | 'inbox_only'). EstimatedDeliveryAt is
+	// null in Phase B (filled from Phase C onward when a row is deferred).
+	Urgency             string  `json:"urgency,omitempty"`
+	DeliveryPolicy      string  `json:"delivery_policy,omitempty"`
+	EstimatedDeliveryAt *string `json:"estimated_delivery_at,omitempty"`
 }
 
 type UserMessagingListResponse struct {
