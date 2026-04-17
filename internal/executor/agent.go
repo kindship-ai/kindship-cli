@@ -3,13 +3,62 @@ package executor
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sync/atomic"
+	"time"
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
 )
+
+// Session-conflict retry tuning. Bounded retry loop around the Claude
+// subprocess invocation only — other CLIs (codex, gemini, opencode) do
+// not plumb --session-id today, so no retry branch applies to them.
+const (
+	sessionConflictMaxAttempts   = 3
+	sessionConflictBaseDelayMs   = 2000
+	sessionConflictJitterMaxMs   = 1000
+	sessionConflictLogPrefix     = "[kindship:session-conflict-retry"
+)
+
+// commandContext is the seam for constructing the Claude subprocess.
+// Production wires it to exec.Command + cmd.Dir = /workspace; unit tests
+// override it to return a fake *exec.Cmd (typically `sh -c '...'`) that
+// writes deterministic stdout/stderr and exits with a known code without
+// requiring /workspace to exist. Without this seam the retry loop would
+// need a live `kindship auth claude` binary to test.
+var commandContext = func(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = "/workspace"
+	return cmd
+}
+
+// sessionConflictPattern matches the Claude Code CLI error emitted when two
+// processes try to hold the same --session-id concurrently. The canonical
+// phrase referenced in kindship-vercel/apps/web/lib/planning/complete-execution.ts
+// is "Session ID already in use". Pattern is intentionally forgiving (case-
+// insensitive, flexible whitespace/punctuation) because the exact wording
+// drifts across Claude Code minor versions.
+//
+// Last verified (regex hit against production stderr): pending — not yet
+// confirmed against live collision output. Fallback to published phrasing.
+// If retries silently stop firing after a Claude update, re-capture the
+// current stderr string on a live container and update this pattern.
+var sessionConflictPattern = regexp.MustCompile(`(?i)session[\s_\-:,.]*id\b[^\n]{0,80}?already[^\n]{0,10}?in[^\n]{0,10}?use`)
+
+// isSessionConflictError reports whether the given stderr buffer contains
+// the Claude Code "session already in use" error. Used by the retry loop
+// inside ExecuteAgentStreaming to know when a transient session-lock race
+// is worth retrying.
+func isSessionConflictError(stderr string) bool {
+	if stderr == "" {
+		return false
+	}
+	return sessionConflictPattern.MatchString(stderr)
+}
 
 // resolveInnerLoopCli returns the coding CLI to use for AGENT execution.
 // Reads INNER_LOOP_CLI env var, defaults to "claude".
@@ -217,8 +266,12 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 // ExecuteAgentStreaming executes a planning entity using the selected coding CLI,
 // streaming logs in real-time via LogSender.
 // Supports session continuity via sessionID/isResume for system-chat (Claude only).
+// When sessionRetryOnConflict is true AND cli resolves to "claude", transient
+// "Session ID already in use" errors on subprocess stderr trigger a bounded
+// retry loop (up to sessionConflictMaxAttempts with jittered backoff). The
+// retry is invisible to the caller — only the final attempt's result surfaces.
 // Retrieves memU memory context and appends to system prompt.
-func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64, sessionID string, isResume bool) *ExecutionResult {
+func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64, sessionID string, isResume bool, sessionRetryOnConflict bool) *ExecutionResult {
 	cli := resolveInnerLoopCli()
 	model := resolveInnerLoopModel()
 
@@ -262,48 +315,105 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 	// 6. Build CLI-specific args
 	cliCommand, cliArgs := buildCliArgs(cli, model, systemPrompt, taskPrompt, sessionID, isResume)
 
-	// 7. Execute via kindship auth <cli> which injects secrets
-	fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
-	cmd := exec.Command("kindship", fullArgs...)
-	cmd.Dir = "/workspace"
-
 	fmt.Printf("[inner-loop] Using CLI: %s (command: kindship auth %s)\n", cli, cliCommand)
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	stdoutPassthru := &limitedWriter{buf: &stdoutBuf, limit: 10 << 20} // 10MB for agent
-	stderrPassthru := &limitedWriter{buf: &stderrBuf, limit: 10 << 20}
-
-	stdoutStream := NewStreamWriter("stdout", sender, stdoutPassthru, seq)
-	stderrStream := NewStreamWriter("stderr", sender, stderrPassthru, seq)
-
-	cmd.Stdout = stdoutStream
-	cmd.Stderr = stderrStream
-
-	execErr := cmd.Run()
-
-	stdoutStream.Close()
-	stderrStream.Close()
-
-	exitCode := 0
-	if execErr != nil {
-		if exitError, ok := execErr.(*exec.ExitError); ok {
-			exitCode = exitError.ExitCode()
-		} else {
-			exitCode = 1
-		}
-	}
+	finalStdoutBuf, finalStderrBuf, finalExitCode, finalExecErr :=
+		runClaudeWithRetry(cli, cliCommand, cliArgs, sender, seq, sessionRetryOnConflict)
 
 	// Only reduce stream-json for Claude (other CLIs don't output this format yet)
-	stdout := stdoutBuf.String()
+	stdout := finalStdoutBuf.String()
 	if cli == "claude" {
 		stdout = reduceStreamJSONForCompletion(stdout)
 	}
 
 	return &ExecutionResult{
-		Success:  exitCode == 0,
+		Success:  finalExitCode == 0,
 		Stdout:   stdout,
-		Stderr:   stderrBuf.String(),
-		ExitCode: exitCode,
-		Error:    execErr,
+		Stderr:   finalStderrBuf.String(),
+		ExitCode: finalExitCode,
+		Error:    finalExecErr,
 	}
+}
+
+// runClaudeWithRetry executes `kindship auth <cliCommand> <cliArgs...>` and,
+// for Claude specifically with sessionRetryOnConflict enabled, retries on
+// "Session ID already in use" up to sessionConflictMaxAttempts times with
+// jittered backoff. Only the final attempt's buffers are returned to the
+// caller — retry noise is surfaced via the stderr stream (which flows to
+// run logs) using the `[kindship:session-conflict-retry ...]` marker.
+//
+// This function is the retry-loop seam. Unit tests swap `commandContext`
+// and (optionally) the sleep path to exercise all branches.
+func runClaudeWithRetry(
+	cli string,
+	cliCommand string,
+	cliArgs []string,
+	sender LogSender,
+	seq *atomic.Int64,
+	sessionRetryOnConflict bool,
+) (finalStdout bytes.Buffer, finalStderr bytes.Buffer, finalExitCode int, finalExecErr error) {
+	retryEligible := sessionRetryOnConflict && cli == "claude"
+	maxAttempts := 1
+	if retryEligible {
+		maxAttempts = sessionConflictMaxAttempts
+	}
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		fullArgs := append([]string{"auth", cliCommand}, cliArgs...)
+		cmd := commandContext("kindship", fullArgs...)
+
+		// Fresh buffers per attempt so we can inspect this-attempt stderr
+		// for the conflict marker without carrying over prior attempts'
+		// noise. The caller only sees the FINAL attempt's stdout/stderr.
+		var stdoutBuf, stderrBuf bytes.Buffer
+		stdoutPassthru := &limitedWriter{buf: &stdoutBuf, limit: 10 << 20} // 10MB for agent
+		stderrPassthru := &limitedWriter{buf: &stderrBuf, limit: 10 << 20}
+
+		stdoutStream := NewStreamWriter("stdout", sender, stdoutPassthru, seq)
+		stderrStream := NewStreamWriter("stderr", sender, stderrPassthru, seq)
+
+		cmd.Stdout = stdoutStream
+		cmd.Stderr = stderrStream
+
+		execErr := cmd.Run()
+
+		stdoutStream.Close()
+		stderrStream.Close()
+
+		exitCode := 0
+		if execErr != nil {
+			if exitError, ok := execErr.(*exec.ExitError); ok {
+				exitCode = exitError.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+
+		shouldRetry := retryEligible &&
+			attempt < maxAttempts &&
+			exitCode != 0 &&
+			isSessionConflictError(stderrBuf.String())
+
+		if shouldRetry {
+			waitMs := sessionConflictBaseDelayMs + rand.Intn(sessionConflictJitterMaxMs)
+			// Emit retry notice via the stderr stream so it flows through
+			// the CLI's existing logSender path to the run-logs column —
+			// NOT via Hatchet workflow's spawnResult.stderr (nohup +
+			// redirection decouples child stderr from spawn return), and
+			// NOT via a new Axiom logger (would require threading a logger
+			// into the executor, widening the change).
+			retryStream := NewStreamWriter("stderr", sender, stderrPassthru, seq)
+			fmt.Fprintf(retryStream, "%s attempt=%d waited_ms=%d]\n", sessionConflictLogPrefix, attempt, waitMs)
+			retryStream.Close()
+			time.Sleep(time.Duration(waitMs) * time.Millisecond)
+			continue
+		}
+
+		finalStdout = stdoutBuf
+		finalStderr = stderrBuf
+		finalExitCode = exitCode
+		finalExecErr = execErr
+		return
+	}
+	return
 }

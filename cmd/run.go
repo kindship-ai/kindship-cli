@@ -17,11 +17,12 @@ import (
 )
 
 var (
-	agentID    string
-	serviceKey string
-	apiURL     string
-	sessionID  string
-	resume     bool
+	agentID                string
+	serviceKey             string
+	apiURL                 string
+	sessionID              string
+	resume                 bool
+	sessionRetryOnConflict bool
 )
 
 var runCmd = &cobra.Command{
@@ -113,13 +114,14 @@ func runExecute(cmd *cobra.Command, args []string) error {
 
 	// Otherwise, execute a single entity
 	success, err := executeEntity(EntityExecutionParams{
-		EntityID:   entityID,
-		AgentID:    agentID,
-		ServiceKey: serviceKey,
-		Client:     client,
-		Log:        log,
-		SessionID:  sessionID,
-		Resume:     resume,
+		EntityID:               entityID,
+		AgentID:                agentID,
+		ServiceKey:             serviceKey,
+		Client:                 client,
+		Log:                    log,
+		SessionID:              sessionID,
+		Resume:                 resume,
+		SessionRetryOnConflict: sessionRetryOnConflict,
 	})
 
 	if err != nil {
@@ -136,14 +138,15 @@ func runExecute(cmd *cobra.Command, args []string) error {
 // EntityExecutionParams holds parameters for executing an entity.
 // Used by both `kindship run <id>` and the agent loop.
 type EntityExecutionParams struct {
-	EntityID    string
-	AgentID     string
-	ServiceKey  string
-	Client      *api.Client
-	Log         *logging.Logger
-	ParentRunID string // ORCHESTRATE run ID (empty for top-level runs)
-	SessionID   string // Claude Code session ID for session continuity
-	Resume      bool   // Resume existing session (--resume flag)
+	EntityID                string
+	AgentID                 string
+	ServiceKey              string
+	Client                  *api.Client
+	Log                     *logging.Logger
+	ParentRunID             string // ORCHESTRATE run ID (empty for top-level runs)
+	SessionID               string // Claude Code session ID for session continuity
+	Resume                  bool   // Resume existing session (--resume flag)
+	SessionRetryOnConflict  bool   // Retry on "Session ID already in use" (Claude only)
 }
 
 // executeEntity runs the full execution lifecycle for a single entity.
@@ -285,7 +288,7 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		// HYBRID uses LLM with entity context + code as reference
 		result = executor.ExecuteLLMStreaming(&entityResp.Entity, startResp.Inputs, logSender, &sharedSeq)
 	case api.ExecutionModeAgent:
-		result = executor.ExecuteAgentStreaming(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey, logSender, &sharedSeq, params.SessionID, params.Resume)
+		result = executor.ExecuteAgentStreaming(&entityResp.Entity, startResp.Inputs, params.Client, params.ServiceKey, logSender, &sharedSeq, params.SessionID, params.Resume, params.SessionRetryOnConflict)
 	default:
 		log.Error("Unknown execution mode", nil, map[string]interface{}{
 			"mode": entityResp.Entity.ExecutionMode,
@@ -604,14 +607,15 @@ func orchestrateChildren(entityID, runID, sessionID string, client *api.Client, 
 		})
 
 		success, err := executeEntity(EntityExecutionParams{
-			EntityID:    nextResp.Task.ID,
-			AgentID:     agentID,
-			ServiceKey:  serviceKey,
-			Client:      client,
-			Log:         log,
-			ParentRunID: runID,
-			SessionID:   sessionID,
-			Resume:      sessionID != "",
+			EntityID:               nextResp.Task.ID,
+			AgentID:                agentID,
+			ServiceKey:             serviceKey,
+			Client:                 client,
+			Log:                    log,
+			ParentRunID:            runID,
+			SessionID:              sessionID,
+			Resume:                 sessionID != "",
+			SessionRetryOnConflict: sessionRetryOnConflict,
 		})
 
 		if err != nil {
@@ -707,4 +711,5 @@ func init() {
 	runCmd.Flags().StringVar(&apiURL, "api-url", "", "API base URL (defaults to KINDSHIP_API_URL env var or https://kindship.ai)")
 	runCmd.Flags().StringVar(&sessionID, "session-id", "", "Claude Code session ID for session continuity")
 	runCmd.Flags().BoolVar(&resume, "resume", false, "Resume an existing Claude Code session (requires --session-id)")
+	runCmd.Flags().BoolVar(&sessionRetryOnConflict, "session-retry-on-conflict", false, "Retry up to 3x with jittered backoff on 'Session ID already in use' (Claude only; see internal/executor/agent.go)")
 }
