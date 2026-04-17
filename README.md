@@ -91,6 +91,28 @@ kindship site status my-app
 
 `kindship site push <site-name>` deploys from that canonical workspace unless `--dir` is explicitly provided.
 
+### Videos
+
+```bash
+kindship video publish intro --title "Meet Ripple"
+```
+
+`kindship video publish <slug>` tars an agent's Remotion bundle
+(`composition.mjs` + `compositions.json` + any `public/` assets) and
+uploads it to the Kindship publish pipeline. Each call creates a new
+immutable revision of the same logical video, so re-publishing under the
+same slug is how you iterate — the Videos tab in the web UI always plays
+the latest.
+
+By default the video workspace lives at `/workspace/videos/<slug>/` in
+container mode. The full authoring workflow — scaffold, compose, esbuild
+to `composition.mjs`, emit `compositions.json`, publish — is documented
+in the `kindship-video` skill.
+
+`kindship video list` and `kindship video delete` are stubbed in the
+current release; manage existing videos through the Videos tab in the web
+UI for now.
+
 ## Agent Containers (Service Key Mode)
 
 The original `kindship auth` flow is for Kindship agent containers. It fetches secrets from the Kindship API and injects them as environment variables into a subprocess.
