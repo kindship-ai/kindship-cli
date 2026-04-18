@@ -155,7 +155,7 @@ The `kindship-video` skill step 4 covers the wiring in full.
 | Flag              | Required | Description                                                                      |
 | ----------------- | -------- | -------------------------------------------------------------------------------- |
 | `--prompt`        | yes      | Style description — genre, instrument, tempo, mood. 8–1000 chars.                |
-| `--duration-ms`   | yes      | Target length in ms; 3000–120000. Typical: 10000–30000.                          |
+| `--duration-ms`   | yes      | Target length in ms; 3000–120000.                                                |
 | `--output-format` | no       | `mp3_44100_128` (default; only supported today).                                 |
 | `--output`        | no       | Destination path. Default `/workspace/documents/music/<slug>.mp3`.               |
 | `--format`        | no       | CLI success summary: `text` (default) or `json`.                                 |

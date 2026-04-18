@@ -38,9 +38,9 @@ Remotion videos.
 
 TL;DR:
 
-  kindship music generate signature-contemplative \
-    --prompt "ambient neoclassical piano, 70 BPM, minor key, pensive" \
-    --duration-ms 20000`,
+  kindship music generate <slug> \
+    --prompt "<style prompt — genre, instrument, tempo, mood>" \
+    --duration-ms <ms>`,
 }
 
 var musicGenerateCmd = &cobra.Command{
@@ -58,13 +58,16 @@ kindship-docs-sync, so tracks are durable across container destroy.
 Rate limit: 2 generations per minute per account. 429 responses include
 a Retry-After header which this CLI surfaces in the error message.
 
-Examples:
+The --prompt carries the style — genre, instrument, tempo, mood — and
+the --duration-ms target length. Prompt shape examples (pick your own
+duration per call):
+
   kindship music generate signature-contemplative \
     --prompt "ambient neoclassical piano, 70 BPM, minor key, pensive" \
-    --duration-ms 20000
+    --duration-ms <ms>
   kindship music generate signature-kinetic \
     --prompt "upbeat electronic pulse, 110 BPM, light percussion, forward motion" \
-    --duration-ms 12000`,
+    --duration-ms <ms>`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMusicGenerate,
 }
