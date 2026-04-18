@@ -130,6 +130,39 @@ publish — is documented in the `kindship-video` skill.
 current release; manage existing videos through the Videos tab in the web
 UI for now.
 
+### Music
+
+```bash
+kindship music generate signature-contemplative \
+  --prompt "ambient neoclassical piano, 70 BPM, minor key, pensive" \
+  --duration-ms 20000
+```
+
+`kindship music generate <slug>` POSTs to a Vercel-hosted proxy that
+calls ElevenLabs' music compose endpoint with a server-side API key
+(never on the container), streams the generated mp3 back, and writes it
+to `/workspace/documents/music/<slug>.mp3`. That path is inside the
+agent's documents folder so it syncs to the docs repo on GitHub via
+`kindship-docs-sync` — the library survives container destroy.
+
+Incorporate a generated track into a Remotion video by copying it into a
+`music/` sibling of `composition.mjs` and referencing it with
+`<Audio src={new URL('./music/<slug>.mp3', import.meta.url).href} />`.
+The `kindship-video` skill step 4 covers the wiring in full.
+
+#### Flags
+
+| Flag              | Required | Description                                                                      |
+| ----------------- | -------- | -------------------------------------------------------------------------------- |
+| `--prompt`        | yes      | Style description — genre, instrument, tempo, mood. 8–1000 chars.                |
+| `--duration-ms`   | yes      | Target length in ms; 3000–120000. Typical: 10000–30000.                          |
+| `--output-format` | no       | `mp3_44100_128` (default; only supported today).                                 |
+| `--output`        | no       | Destination path. Default `/workspace/documents/music/<slug>.mp3`.               |
+| `--format`        | no       | CLI success summary: `text` (default) or `json`.                                 |
+
+Rate limit: **2 generations per minute per account**. On 429 the CLI
+surfaces `Retry-After` in the error message.
+
 ## Agent Containers (Service Key Mode)
 
 The original `kindship auth` flow is for Kindship agent containers. It fetches secrets from the Kindship API and injects them as environment variables into a subprocess.

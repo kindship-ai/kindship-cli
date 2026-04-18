@@ -62,7 +62,10 @@ var videoPublishCmd = &cobra.Command{
                              (produced by esbuild — see SKILL.md)
   <dir>/compositions.json  — Remotion compositions manifest
                              ('npx remotion compositions ./src/index.ts --json > compositions.json')
-  <dir>/public/            — optional, included if present (audio, fonts, images)
+  <dir>/public/            — optional, included if present (images, fonts; audio goes in music/)
+  <dir>/music/             — optional, signature audio sidecar
+                             (referenced by compositions via new URL('./music/<slug>.mp3', import.meta.url).href);
+                             see kindship-video SKILL step 4 for the <Audio> wiring
   <dir>/poster.png         — optional, used as the Videos tab thumbnail
                              (produced by 'npx remotion still <id> poster.png --frame=<N> --scale=0.5');
                              only the exact lowercase filename 'poster.png' at root is recognized
@@ -304,7 +307,10 @@ func validateSlug(slug string) error {
 //   - composition.mjs at the archive root,
 //   - compositions.json at the archive root,
 //   - every regular file under publicDir (if publicDir exists), placed at
-//     its <slug-dir>/-relative path (so public/audio.mp3 → "public/audio.mp3"),
+//     its <slug-dir>/-relative path (so public/fonts/foo.woff2 → "public/fonts/foo.woff2"),
+//   - every regular file under <slug-dir>/music/ (if present), placed at
+//     "music/<...>" — the signature-audio sidecar referenced by compositions
+//     via `new URL('./music/<slug>.mp3', import.meta.url).href`.
 //   - optional poster.png at the archive root (a sibling of composition.mjs),
 //     used as the Videos tab thumbnail — only the exact lowercase filename
 //     "poster.png" is recognized; missing poster is silent (not an error).
@@ -362,6 +368,38 @@ func createVideoArchive(compositionMjs, compositionsFile, publicDir string) (*by
 		})
 		if walkErr != nil {
 			return nil, 0, fmt.Errorf("failed to walk public dir: %w", walkErr)
+		}
+	}
+
+	// Optional: walk <slug-dir>/music/ — signature-audio sidecar. Kept
+	// separate from public/ because compositions resolve audio via
+	// `new URL('./music/<slug>.mp3', import.meta.url).href`, which
+	// requires the file to be a sibling of composition.mjs (not nested
+	// under public/). Mirrors the public/ walk's hygiene: skip symlinks
+	// and non-regular files; silent on missing dir.
+	musicDir := filepath.Join(filepath.Dir(compositionMjs), "music")
+	if info, err := os.Stat(musicDir); err == nil && info.IsDir() {
+		baseDir := filepath.Dir(musicDir) // <slug-dir>
+		walkErr := filepath.Walk(musicDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 || info.IsDir() || !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(baseDir, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel) // "music/<...>"
+			if err := writeTarEntry(tw, rel, info, path); err != nil {
+				return err
+			}
+			fileCount++
+			return nil
+		})
+		if walkErr != nil {
+			return nil, 0, fmt.Errorf("failed to walk music dir: %w", walkErr)
 		}
 	}
 

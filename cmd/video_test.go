@@ -101,6 +101,105 @@ func TestCreateVideoArchivePoster(t *testing.T) {
 	}
 }
 
+// Music bundling lives in createVideoArchive alongside the poster
+// probe — exercised here so the signature-audio sidecar contract is
+// locked in. Music files flow at archive root under "music/<...>"
+// (sibling of composition.mjs), NOT nested under public/music, because
+// compositions resolve audio via new URL(import.meta.url)-relative
+// paths and the file must be a sibling of composition.mjs.
+func TestCreateVideoArchiveMusic(t *testing.T) {
+	tests := []struct {
+		name        string
+		musicFiles  map[string]string // relative path under music/ → content
+		wantMembers []string          // expected archive members
+		notMembers  []string
+	}{
+		{
+			name:        "no music dir: archive omits music entries",
+			musicFiles:  nil,
+			wantMembers: []string{"composition.mjs", "compositions.json"},
+			notMembers:  []string{"music/signature.mp3", "public/music/signature.mp3"},
+		},
+		{
+			name: "single track: packed at archive root music/",
+			musicFiles: map[string]string{
+				"signature-contemplative.mp3": "\xff\xfb-fake-mp3-",
+			},
+			wantMembers: []string{
+				"composition.mjs",
+				"compositions.json",
+				"music/signature-contemplative.mp3",
+			},
+			notMembers: []string{"public/music/signature-contemplative.mp3"},
+		},
+		{
+			name: "multiple tracks: all packed",
+			musicFiles: map[string]string{
+				"signature-contemplative.mp3": "\xff\xfb-fake-a-",
+				"signature-kinetic.mp3":       "\xff\xfb-fake-b-",
+			},
+			wantMembers: []string{
+				"composition.mjs",
+				"compositions.json",
+				"music/signature-contemplative.mp3",
+				"music/signature-kinetic.mp3",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			compMjs := filepath.Join(dir, "composition.mjs")
+			compJSON := filepath.Join(dir, "compositions.json")
+			if err := os.WriteFile(compMjs, []byte("export default () => null;"), 0o644); err != nil {
+				t.Fatalf("write composition.mjs: %v", err)
+			}
+			if err := os.WriteFile(compJSON, []byte(`[{"id":"t","durationInFrames":1,"fps":30,"width":16,"height":9}]`), 0o644); err != nil {
+				t.Fatalf("write compositions.json: %v", err)
+			}
+
+			if tt.musicFiles != nil {
+				musicDir := filepath.Join(dir, "music")
+				if err := os.MkdirAll(musicDir, 0o755); err != nil {
+					t.Fatalf("mkdir music: %v", err)
+				}
+				for rel, content := range tt.musicFiles {
+					if err := os.WriteFile(filepath.Join(musicDir, rel), []byte(content), 0o644); err != nil {
+						t.Fatalf("write music/%s: %v", rel, err)
+					}
+				}
+			}
+
+			publicDir := filepath.Join(dir, "public")
+
+			buf, fileCount, err := createVideoArchive(compMjs, compJSON, publicDir)
+			if err != nil {
+				t.Fatalf("createVideoArchive: %v", err)
+			}
+
+			members := readTarGzMembers(t, buf)
+			memberSet := make(map[string]bool, len(members))
+			for _, m := range members {
+				memberSet[m] = true
+			}
+			for _, want := range tt.wantMembers {
+				if !memberSet[want] {
+					t.Errorf("expected member %q, got %v", want, members)
+				}
+			}
+			for _, avoid := range tt.notMembers {
+				if memberSet[avoid] {
+					t.Errorf("unexpected member %q, got %v", avoid, members)
+				}
+			}
+			if fileCount != len(members) {
+				t.Errorf("fileCount = %d but archive has %d members (%v)", fileCount, len(members), members)
+			}
+		})
+	}
+}
+
 // readTarGzMembers returns the names of every regular file inside a
 // gzip-compressed tarball. Order preserved (tarball is small enough that
 // tests compare via a member-set, not order).
