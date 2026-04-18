@@ -40,6 +40,7 @@ the full workflow. TL;DR:
     --external:remotion --external:'@remotion/*' \
     --outfile=composition.mjs
   npx remotion compositions ./src/index.ts --json > compositions.json
+  npx remotion still <composition-id> poster.png --frame=<N> --scale=0.5  # optional
   kindship video publish <slug> --title "..."`,
 }
 
@@ -62,6 +63,9 @@ var videoPublishCmd = &cobra.Command{
   <dir>/compositions.json  — Remotion compositions manifest
                              ('npx remotion compositions ./src/index.ts --json > compositions.json')
   <dir>/public/            — optional, included if present (audio, fonts, images)
+  <dir>/poster.png         — optional, used as the Videos tab thumbnail
+                             (produced by 'npx remotion still <id> poster.png --frame=<N> --scale=0.5');
+                             only the exact lowercase filename 'poster.png' at root is recognized
 
 By default <dir> is /workspace/videos/<slug>/ (or the current directory if
 you're standing in it). Override with --dir.
@@ -300,7 +304,10 @@ func validateSlug(slug string) error {
 //   - composition.mjs at the archive root,
 //   - compositions.json at the archive root,
 //   - every regular file under publicDir (if publicDir exists), placed at
-//     its <slug-dir>/-relative path (so public/audio.mp3 → "public/audio.mp3").
+//     its <slug-dir>/-relative path (so public/audio.mp3 → "public/audio.mp3"),
+//   - optional poster.png at the archive root (a sibling of composition.mjs),
+//     used as the Videos tab thumbnail — only the exact lowercase filename
+//     "poster.png" is recognized; missing poster is silent (not an error).
 //
 // Webpack chunks from `npx remotion bundle` are deliberately NOT included.
 // The server expects composition.mjs as the player entry point.
@@ -356,6 +363,18 @@ func createVideoArchive(compositionMjs, compositionsFile, publicDir string) (*by
 		if walkErr != nil {
 			return nil, 0, fmt.Errorf("failed to walk public dir: %w", walkErr)
 		}
+	}
+
+	// Optional: poster.png at the video-dir root (sibling of composition.mjs).
+	// The server recognizes exactly this filename, lowercase; JPG/WebP here
+	// are ignored even if present. Missing poster is silent — publish is
+	// expected to succeed without one, the UI just falls back to a Film icon.
+	posterPath := filepath.Join(filepath.Dir(compositionMjs), "poster.png")
+	if info, statErr := os.Stat(posterPath); statErr == nil && info.Mode().IsRegular() {
+		if err := writeTarEntry(tw, "poster.png", info, posterPath); err != nil {
+			return nil, 0, fmt.Errorf("failed to add poster.png to archive: %w", err)
+		}
+		fileCount++
 	}
 
 	if err := tw.Close(); err != nil {

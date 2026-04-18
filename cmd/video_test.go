@@ -1,0 +1,128 @@
+package cmd
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// createVideoArchive packs a Remotion bundle tarball. This test locks in the
+// canonical-lowercase `poster.png` contract added in v0.1.49 so we don't
+// silently regress to packing random image files or forgetting the poster
+// entirely on future edits.
+func TestCreateVideoArchivePoster(t *testing.T) {
+	tests := []struct {
+		name        string
+		extraFiles  map[string]string // path (relative to dir) → content
+		wantMembers []string          // expected archive members (unordered OK)
+		notMembers  []string          // members that must NOT be in the archive
+	}{
+		{
+			name:        "no poster: archive has only composition.mjs + compositions.json",
+			extraFiles:  nil,
+			wantMembers: []string{"composition.mjs", "compositions.json"},
+			notMembers:  []string{"poster.png", "poster.jpg", "poster.webp"},
+		},
+		{
+			name: "poster.png present: included at archive root",
+			extraFiles: map[string]string{
+				"poster.png": "\x89PNG\r\n\x1a\n-fake-",
+			},
+			wantMembers: []string{"composition.mjs", "compositions.json", "poster.png"},
+			notMembers:  []string{"poster.jpg", "poster.webp"},
+		},
+		{
+			name: "poster.jpg alone (no poster.png): ignored per single-canonical policy",
+			extraFiles: map[string]string{
+				"poster.jpg": "\xff\xd8\xff\xe0-fake-",
+			},
+			wantMembers: []string{"composition.mjs", "compositions.json"},
+			notMembers:  []string{"poster.png", "poster.jpg", "poster.webp"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Scratch dir laid out like /workspace/videos/<slug>/: a minimal
+			// composition.mjs + compositions.json plus whatever the case
+			// says should be there.
+			dir := t.TempDir()
+			compMjs := filepath.Join(dir, "composition.mjs")
+			compJSON := filepath.Join(dir, "compositions.json")
+
+			if err := os.WriteFile(compMjs, []byte("export default () => null;"), 0o644); err != nil {
+				t.Fatalf("write composition.mjs: %v", err)
+			}
+			if err := os.WriteFile(compJSON, []byte(`[{"id":"t","durationInFrames":1,"fps":30,"width":16,"height":9}]`), 0o644); err != nil {
+				t.Fatalf("write compositions.json: %v", err)
+			}
+			for rel, content := range tt.extraFiles {
+				if err := os.WriteFile(filepath.Join(dir, rel), []byte(content), 0o644); err != nil {
+					t.Fatalf("write %s: %v", rel, err)
+				}
+			}
+
+			// publicDir is intentionally missing — this test doesn't exercise
+			// the public/ walk, just the canonical-name + optional poster
+			// logic. createVideoArchive gracefully skips a non-existent dir.
+			publicDir := filepath.Join(dir, "public")
+
+			buf, fileCount, err := createVideoArchive(compMjs, compJSON, publicDir)
+			if err != nil {
+				t.Fatalf("createVideoArchive: %v", err)
+			}
+
+			members := readTarGzMembers(t, buf)
+			memberSet := make(map[string]bool, len(members))
+			for _, m := range members {
+				memberSet[m] = true
+			}
+
+			for _, want := range tt.wantMembers {
+				if !memberSet[want] {
+					t.Errorf("expected member %q in archive, got members: %v", want, members)
+				}
+			}
+			for _, avoid := range tt.notMembers {
+				if memberSet[avoid] {
+					t.Errorf("unexpected member %q in archive, got members: %v", avoid, members)
+				}
+			}
+
+			// fileCount should track the actual archive member count.
+			if fileCount != len(members) {
+				t.Errorf("fileCount = %d but archive has %d members (%v)", fileCount, len(members), members)
+			}
+		})
+	}
+}
+
+// readTarGzMembers returns the names of every regular file inside a
+// gzip-compressed tarball. Order preserved (tarball is small enough that
+// tests compare via a member-set, not order).
+func readTarGzMembers(t *testing.T, buf *bytes.Buffer) []string {
+	t.Helper()
+	gr, err := gzip.NewReader(buf)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	var members []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tr.Next: %v", err)
+		}
+		members = append(members, hdr.Name)
+	}
+	return members
+}

@@ -98,16 +98,22 @@ kindship video publish intro --title "Meet Ripple"
 ```
 
 `kindship video publish <slug>` tars an agent's Remotion bundle
-(`composition.mjs` + `compositions.json` + any `public/` assets) and
-uploads it to the Kindship publish pipeline. Each call creates a new
-immutable revision of the same logical video, so re-publishing under the
-same slug is how you iterate — the Videos tab in the web UI always plays
-the latest.
+(`composition.mjs` + `compositions.json` + any `public/` assets, plus an
+optional `poster.png` at the workspace root) and uploads it to the
+Kindship publish pipeline. Each call creates a new immutable revision of
+the same logical video, so re-publishing under the same slug is how you
+iterate — the Videos tab in the web UI always plays the latest.
+
+Drop a `poster.png` at the workspace root (produced by
+`npx remotion still <composition-id> poster.png --frame=<N> --scale=0.5`)
+and the Videos tab will use it as the thumbnail. Only the exact lowercase
+filename `poster.png` is recognized; missing poster is fine — the tab
+falls back to a generic icon.
 
 By default the video workspace lives at `/workspace/videos/<slug>/` in
 container mode. The full authoring workflow — scaffold, compose, esbuild
-to `composition.mjs`, emit `compositions.json`, publish — is documented
-in the `kindship-video` skill.
+to `composition.mjs`, emit `compositions.json`, render the poster,
+publish — is documented in the `kindship-video` skill.
 
 #### Flags
 
