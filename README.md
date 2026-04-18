@@ -109,6 +109,17 @@ container mode. The full authoring workflow — scaffold, compose, esbuild
 to `composition.mjs`, emit `compositions.json`, publish — is documented
 in the `kindship-video` skill.
 
+#### Flags
+
+| Flag                | Required      | Description                                                                                                |
+| ------------------- | ------------- | ---------------------------------------------------------------------------------------------------------- |
+| `--title`           | yes           | Human-readable title shown in the Videos tab.                                                              |
+| `--description`     | no            | One-sentence description.                                                                                   |
+| `--composition-id`  | conditionally | Required only when `compositions.json` lists more than one composition. Otherwise the only entry is auto-selected. |
+| `--input-props`     | no            | JSON object of default props for `<Player>`. Falls back to the composition's `defaultProps`, then `{}`.     |
+| `--dir`             | no            | Override the workspace dir (default `/workspace/videos/<slug>/`).                                           |
+| `--format`          | no            | Output format: `text` (default) or `json`.                                                                  |
+
 `kindship video list` and `kindship video delete` are stubbed in the
 current release; manage existing videos through the Videos tab in the web
 UI for now.
