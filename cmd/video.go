@@ -26,7 +26,7 @@ var videoCmd = &cobra.Command{
 	Long: `Commands for publishing Remotion-based videos.
 
 Subcommands:
-  publish  Upload a built Remotion bundle
+  publish  Upload a built Remotion composition
   list     List your videos (not yet implemented)
   delete   Delete a video (not yet implemented)
 
@@ -34,8 +34,12 @@ See the kindship-video skill (~/.claude/skills/kindship-video/SKILL.md) for
 the full workflow. TL;DR:
 
   cd /workspace/videos/<slug>
-  npx remotion bundle
-  npx remotion compositions ./build --json > compositions.json
+  npx esbuild src/Composition.tsx --bundle --format=esm --target=es2022 \
+    --jsx=automatic --loader:.tsx=tsx --loader:.ts=ts --loader:.css=css \
+    --external:react --external:react-dom \
+    --external:remotion --external:'@remotion/*' \
+    --outfile=composition.mjs
+  npx remotion compositions ./src/index.ts --json > compositions.json
   kindship video publish <slug> --title "..."`,
 }
 
@@ -50,13 +54,21 @@ var (
 
 var videoPublishCmd = &cobra.Command{
 	Use:   "publish <slug>",
-	Short: "Publish a built Remotion bundle",
-	Long: `Publish the current video bundle. Expects <dir>/build/ and
-<dir>/compositions.json to exist (produced by 'npx remotion bundle' and
-'npx remotion compositions ./build --json > compositions.json').
+	Short: "Publish a built Remotion composition",
+	Long: `Publish the current video composition. Expects:
+
+  <dir>/composition.mjs    — single ESM module with default-exported component
+                             (produced by esbuild — see SKILL.md)
+  <dir>/compositions.json  — Remotion compositions manifest
+                             ('npx remotion compositions ./src/index.ts --json > compositions.json')
+  <dir>/public/            — optional, included if present (audio, fonts, images)
 
 By default <dir> is /workspace/videos/<slug>/ (or the current directory if
 you're standing in it). Override with --dir.
+
+Note: do NOT use 'npx remotion bundle' (webpack server-side render output).
+The Kindship player loads composition.mjs directly via dynamic-import; webpack
+chunks are not browser-importable as ESM.
 
 Examples:
   kindship video publish milestone-1-retro --title "Milestone 1 retro"
@@ -125,18 +137,19 @@ func runVideoPublish(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to access %s: %w", dir, err)
 	}
 
-	buildDir := filepath.Join(dir, "build")
+	compositionMjs := filepath.Join(dir, "composition.mjs")
 	compositionsFile := filepath.Join(dir, "compositions.json")
+	publicDir := filepath.Join(dir, "public")
 
-	if info, err := os.Stat(buildDir); err != nil || !info.IsDir() {
+	if _, err := os.Stat(compositionMjs); err != nil {
 		return fmt.Errorf(
-			"%s not found or not a directory; run 'npx remotion bundle' inside %s before publishing",
-			buildDir, dir,
+			"%s not found; build it with esbuild before publishing (see kindship-video SKILL.md). Do NOT use 'npx remotion bundle' — its webpack output is not browser-importable as ESM",
+			compositionMjs,
 		)
 	}
 	if _, err := os.Stat(compositionsFile); err != nil {
 		return fmt.Errorf(
-			"%s not found; run 'npx remotion compositions ./build --json > compositions.json' inside %s before publishing",
+			"%s not found; run 'npx remotion compositions ./src/index.ts --json > compositions.json' inside %s before publishing",
 			compositionsFile, dir,
 		)
 	}
@@ -149,15 +162,15 @@ func runVideoPublish(_ *cobra.Command, args []string) error {
 		}
 	}
 
-	// Pack build/ contents (at archive root) + compositions.json (at archive root)
-	// into an in-memory tar.gz. No shell heredocs; pure Go tar.Writer so the
-	// packaging is safe regardless of shell environment.
-	archiveBuf, fileCount, err := createVideoArchive(buildDir, compositionsFile)
+	// Pack composition.mjs + compositions.json (both at archive root) and
+	// every file under <dir>/public/ (preserving its public/ prefix) into
+	// an in-memory tar.gz. Pure Go tar.Writer — safe regardless of shell.
+	archiveBuf, fileCount, err := createVideoArchive(compositionMjs, compositionsFile, publicDir)
 	if err != nil {
 		return err
 	}
-	if fileCount == 0 {
-		return fmt.Errorf("build/ is empty at %s; did 'npx remotion bundle' succeed?", buildDir)
+	if fileCount < 2 {
+		return fmt.Errorf("expected at least composition.mjs + compositions.json in archive, got %d files", fileCount)
 	}
 
 	// Build multipart request
@@ -284,64 +297,66 @@ func validateSlug(slug string) error {
 }
 
 // createVideoArchive streams a gzip-compressed tar containing:
-//   - every regular file under buildDir, placed at its buildDir-relative path
-//     (e.g. buildDir/index.mjs → "index.mjs"),
-//   - compositionsFile, placed at the archive root as "compositions.json".
+//   - composition.mjs at the archive root,
+//   - compositions.json at the archive root,
+//   - every regular file under publicDir (if publicDir exists), placed at
+//     its <slug-dir>/-relative path (so public/audio.mp3 → "public/audio.mp3").
 //
-// The server-side extractor recognizes "compositions.json" at root; every
-// other file goes into the published bundle.
-func createVideoArchive(buildDir, compositionsFile string) (*bytes.Buffer, int, error) {
+// Webpack chunks from `npx remotion bundle` are deliberately NOT included.
+// The server expects composition.mjs as the player entry point.
+func createVideoArchive(compositionMjs, compositionsFile, publicDir string) (*bytes.Buffer, int, error) {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
 
 	fileCount := 0
 
-	err := filepath.Walk(buildDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// Skip symlinks, directories (tar creates them implicitly), and
-		// any non-regular files. Mirrors the site-push policy.
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-
-		rel, err := filepath.Rel(buildDir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		// tar header paths use forward slashes on every platform.
-		rel = filepath.ToSlash(rel)
-
-		if err := writeTarEntry(tw, rel, info, path); err != nil {
-			return err
-		}
-		fileCount++
-		return nil
-	})
+	// composition.mjs at root.
+	mjsInfo, err := os.Stat(compositionMjs)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to walk build dir: %w", err)
+		return nil, 0, fmt.Errorf("failed to stat composition.mjs: %w", err)
 	}
+	if err := writeTarEntry(tw, "composition.mjs", mjsInfo, compositionMjs); err != nil {
+		return nil, 0, fmt.Errorf("failed to add composition.mjs to archive: %w", err)
+	}
+	fileCount++
 
-	// Sibling compositions.json at archive root.
-	info, err := os.Stat(compositionsFile)
+	// compositions.json at root.
+	compInfo, err := os.Stat(compositionsFile)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to stat compositions.json: %w", err)
 	}
-	if err := writeTarEntry(tw, "compositions.json", info, compositionsFile); err != nil {
+	if err := writeTarEntry(tw, "compositions.json", compInfo, compositionsFile); err != nil {
 		return nil, 0, fmt.Errorf("failed to add compositions.json to archive: %w", err)
 	}
 	fileCount++
+
+	// Optional: walk publicDir if present. The slug-dir parent is the base
+	// for the relative path so paths come out as "public/<file>".
+	if info, err := os.Stat(publicDir); err == nil && info.IsDir() {
+		baseDir := filepath.Dir(publicDir) // <slug-dir>
+		walkErr := filepath.Walk(publicDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 || info.IsDir() || !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(baseDir, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel) // "public/<...>"
+			if err := writeTarEntry(tw, rel, info, path); err != nil {
+				return err
+			}
+			fileCount++
+			return nil
+		})
+		if walkErr != nil {
+			return nil, 0, fmt.Errorf("failed to walk public dir: %w", walkErr)
+		}
+	}
 
 	if err := tw.Close(); err != nil {
 		return nil, 0, fmt.Errorf("failed to close tar: %w", err)
