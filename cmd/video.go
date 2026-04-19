@@ -31,6 +31,7 @@ Subcommands:
   status    Show per-video deep dive (revision, deploy, render state)
   render    Upload renderer site + invoke Lambda + save MP4 locally
   download  Fetch a previously-rendered MP4 from the cache
+  review    Send the cached MP4 to Gemini 3.1 Pro for a scene-by-scene UI review
   delete    Delete a video (not yet implemented)
 
 See the kindship-video skill (~/.claude/skills/kindship-video/SKILL.md) for

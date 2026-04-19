@@ -118,3 +118,26 @@ type VideoStatusResponse struct {
 	Revision *VideoStatusRevision `json:"revision"`
 	Error    string               `json:"error,omitempty"`
 }
+
+// VideoReviewRequest is the body for POST /api/cli/videos/[slug]/review.
+// Both fields are optional — server falls back to the bundled rubric +
+// the gemini-3.1-pro-preview model.
+type VideoReviewRequest struct {
+	Prompt string `json:"prompt,omitempty"`
+	Model  string `json:"model,omitempty"`
+}
+
+// VideoReviewResponse is the response from POST /api/cli/videos/[slug]/review.
+// Timing fields are surfaced so the CLI can show the agent how long the
+// upload vs the generate phase took (useful when a review feels slow).
+type VideoReviewResponse struct {
+	Slug        string  `json:"slug"`
+	RevisionID  string  `json:"revision_id"`
+	Model       string  `json:"model"`
+	VideoSizeMB float64 `json:"video_size_mb"`
+	UploadMS    int64   `json:"upload_ms"`
+	GenerateMS  int64   `json:"generate_ms"`
+	TotalMS     int64   `json:"total_ms"`
+	Review      string  `json:"review"`
+	Error       string  `json:"error,omitempty"`
+}
