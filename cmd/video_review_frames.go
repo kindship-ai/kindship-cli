@@ -35,6 +35,17 @@ var (
 const defaultFramesPerScene = 4
 const defaultEvenFrameCount = 8
 
+// sceneFrameOffsets defines where within each scene's duration we sample
+// frames. Pure interior — never within 20% of either scene boundary —
+// to avoid landing on in-fades, out-fades, or cross-fade blanks between
+// scenes. Hits 4 picks per scene at 20%/40%/60%/80% of duration.
+//
+// (Earlier rev used [0, 0.25, 0.5, 0.75] but that consistently sampled
+// blank black/white transition frames, e.g. on Akasha's first review:
+// 8 of 48 frames came back as "Empty State" because 0-offset hit
+// fade-ins. Interior sampling skips those edges cleanly.)
+var sceneFrameOffsets = []float64{0.2, 0.4, 0.6, 0.8}
+
 var videoReviewFramesCmd = &cobra.Command{
 	Use:   "review-frames <slug>",
 	Short: "Review the video as a batch of stills with Gemini 3.1 Pro (skips render)",
@@ -254,17 +265,16 @@ func pickFrames(
 }
 
 // picksFromSceneMetas converts in-memory scene metas to framePicks
-// using the same 0/0.25/0.5/0.75 strategy as picksFromScenes (which
-// reads from scenes.json). Kept separate so the auto-extract path
-// doesn't have to round-trip through disk.
+// using the shared sceneFrameOffsets sampling. Kept separate from
+// picksFromScenes so the auto-extract path doesn't have to round-trip
+// through disk.
 func picksFromSceneMetas(scenes []sceneMeta, fps, totalFrames int) []framePick {
-	offsets := []float64{0, 0.25, 0.5, 0.75}
 	picks := make([]framePick, 0, len(scenes)*defaultFramesPerScene)
 	for _, scene := range scenes {
 		if scene.DurationInFrames <= 0 {
 			continue
 		}
-		for _, o := range offsets {
+		for _, o := range sceneFrameOffsets {
 			frame := scene.From + int(float64(scene.DurationInFrames)*o)
 			if frame < 0 {
 				frame = 0
@@ -311,13 +321,12 @@ func picksFromScenes(path string, fps, totalFrames int) ([]framePick, error) {
 		return nil, fmt.Errorf("%s contained no scenes", path)
 	}
 
-	offsets := []float64{0, 0.25, 0.5, 0.75}
 	picks := make([]framePick, 0, len(scenes)*defaultFramesPerScene)
 	for _, scene := range scenes {
 		if scene.DurationInFrames <= 0 {
 			continue
 		}
-		for _, o := range offsets {
+		for _, o := range sceneFrameOffsets {
 			frame := scene.From + int(float64(scene.DurationInFrames)*o)
 			if frame < 0 {
 				frame = 0
