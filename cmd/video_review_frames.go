@@ -565,7 +565,14 @@ for (let i = 0; i < cfg.frames.length; i++) {
       puppeteerInstance: browser,
     });
   } finally {
-    await browser.close().catch(() => {});
+    // browser.close() can hang in single-process mode if Chromium got
+    // into a bad internal state during render. Cap it at 5s so the
+    // script always exits — leftover Chrome processes are reaped by
+    // the per-frame cycle delay below + the kernel.
+    await Promise.race([
+      browser.close().catch(() => {}),
+      new Promise((r) => setTimeout(r, 5000)),
+    ]);
   }
   // Brief pause between cycles so the kernel can fully reap Chromium's
   // process tree (zombies, child processes, file descriptors) before
@@ -575,6 +582,11 @@ for (let i = 0; i < cfg.frames.length; i++) {
     await new Promise((r) => setTimeout(r, 2000));
   }
 }
+
+// Force-exit even if libuv is keeping the loop alive on lingering
+// websocket handles from a closed-but-not-fully-cleaned-up Chromium.
+// All file writes are synchronous in renderStill so output is durable.
+process.exit(0);
 `
 
 // renderStills writes the inline @remotion/renderer-driven script to
