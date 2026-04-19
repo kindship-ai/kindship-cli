@@ -32,19 +32,26 @@ var (
 	videoReviewFramesKeep    bool
 )
 
-const defaultFramesPerScene = 4
-const defaultEvenFrameCount = 8
+const defaultFramesPerScene = 2
+const defaultEvenFrameCount = 6
 
 // sceneFrameOffsets defines where within each scene's duration we sample
-// frames. Pure interior — never within 20% of either scene boundary —
+// frames. Pure interior — never within 25% of either scene boundary —
 // to avoid landing on in-fades, out-fades, or cross-fade blanks between
-// scenes. Hits 4 picks per scene at 20%/40%/60%/80% of duration.
+// scenes. 2 picks per scene at 30% and 70% of duration: enough to
+// catch within-scene layout issues without overloading the renderer.
 //
-// (Earlier rev used [0, 0.25, 0.5, 0.75] but that consistently sampled
-// blank black/white transition frames, e.g. on Akasha's first review:
-// 8 of 48 frames came back as "Empty State" because 0-offset hit
-// fade-ins. Interior sampling skips those edges cleanly.)
-var sceneFrameOffsets = []float64{0.2, 0.4, 0.6, 0.8}
+// (Earlier revs used 0/0.25/0.5/0.75 then 0.2/0.4/0.6/0.8 — both 24+
+// frames. The smaller batch fits Akasha-sized container memory; agents
+// who need denser sampling can pass --frames explicitly.)
+var sceneFrameOffsets = []float64{0.3, 0.7}
+
+// renderScale shrinks each rendered still to this fraction of the
+// composition's native resolution. 0.5 → 1080p source becomes 540p,
+// cutting Chrome frame buffer + JPEG bytes ≈75%. Layout/spacing/
+// hierarchy critique at 540p stays accurate; only fine typography
+// detail loses fidelity (acceptable trade for container survival).
+const renderScale = 0.5
 
 var videoReviewFramesCmd = &cobra.Command{
 	Use:   "review-frames <slug>",
@@ -438,6 +445,7 @@ type stillRenderArgs struct {
 	CompositionID string           `json:"compositionId"`
 	Frames        []stillRenderArg `json:"frames"`
 	Quality       int              `json:"quality"`
+	Scale         float64          `json:"scale"`
 	Quiet         bool             `json:"quiet"`
 }
 
@@ -488,6 +496,7 @@ try {
       frame: f.frame,
       imageFormat: 'jpeg',
       jpegQuality: cfg.quality,
+      scale: cfg.scale,
       puppeteerInstance: browser,
     });
   }
@@ -510,6 +519,7 @@ func renderStills(dir, compositionID string, picks []framePick, framesDir string
 		Entry:         filepath.Join(dir, "src", "index.ts"),
 		CompositionID: compositionID,
 		Quality:       85,
+		Scale:         renderScale,
 		Quiet:         videoReviewFramesFormat == "json",
 		Frames:        make([]stillRenderArg, len(picks)),
 	}
