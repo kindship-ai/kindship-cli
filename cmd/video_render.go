@@ -607,7 +607,10 @@ func dispatchRender(ctx *auth.Context, agentID, slug string, force bool) (*dispa
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Kindship-CLI-Version", Version)
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	// 130s — matches the server route's 120s maxDuration with a small
+	// network buffer so the CLI never times out while the function still
+	// has time to land the renderId.
+	client := &http.Client{Timeout: 130 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("render dispatch failed: %w", err)
