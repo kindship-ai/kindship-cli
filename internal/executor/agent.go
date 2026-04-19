@@ -15,8 +15,9 @@ import (
 )
 
 // Session-conflict retry tuning. Bounded retry loop around the Claude
-// subprocess invocation only — other CLIs (codex, gemini, opencode) do
-// not plumb --session-id today, so no retry branch applies to them.
+// subprocess invocation only — codex/gemini/opencode do not accept caller-
+// supplied session ids (they auto-generate), so there is no session-lock
+// race for them and no retry branch applies.
 const (
 	sessionConflictMaxAttempts   = 3
 	sessionConflictBaseDelayMs   = 2000
@@ -136,15 +137,30 @@ func translateOpenCodeModel(model string) string {
 // buildCliArgs constructs the command-line arguments for the selected coding CLI.
 // Each CLI has different flags for headless execution.
 // model is the INNER_LOOP_MODEL env var value (e.g., "gpt-5.4", "claude-sonnet-4-6").
+//
+// Session continuity:
+//   - claude uses sessionID + isResume explicitly (caller-supplied id).
+//   - codex/gemini/opencode auto-generate session ids; isResume=true selects
+//     their CLI-native "continue last" flag (exec resume --last / --resume
+//     latest / run --continue). sessionID is ignored for those CLIs.
 func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt string, sessionID string, isResume bool) (command string, args []string) {
 	switch cli {
 	case "codex":
-		args = []string{
-			"exec",
-			taskPrompt,
-			"--dangerously-bypass-approvals-and-sandbox",
-			"--skip-git-repo-check",
-			"--json",
+		if isResume {
+			args = []string{
+				"exec", "resume", "--last", taskPrompt,
+				"--dangerously-bypass-approvals-and-sandbox",
+				"--skip-git-repo-check",
+				"--json",
+			}
+		} else {
+			args = []string{
+				"exec",
+				taskPrompt,
+				"--dangerously-bypass-approvals-and-sandbox",
+				"--skip-git-repo-check",
+				"--json",
+			}
 		}
 		if model != "" {
 			args = append(args, "-m", model)
@@ -157,6 +173,9 @@ func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt stri
 			"-o", "stream-json",
 			"-p", taskPrompt,
 		}
+		if isResume {
+			args = append(args, "--resume", "latest")
+		}
 		if model != "" {
 			args = append(args, "-m", model)
 		}
@@ -164,10 +183,11 @@ func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt stri
 
 	case "opencode":
 		translatedModel := translateOpenCodeModel(model)
-		args = []string{
-			"run", taskPrompt,
-			"--format", "json",
+		args = []string{"run"}
+		if isResume {
+			args = append(args, "--continue")
 		}
+		args = append(args, taskPrompt, "--format", "json")
 		if translatedModel != "" {
 			args = append(args, "-m", translatedModel)
 		}
