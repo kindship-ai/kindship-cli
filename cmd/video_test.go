@@ -200,6 +200,113 @@ func TestCreateVideoArchiveMusic(t *testing.T) {
 	}
 }
 
+// TestCreateVideoArchiveSite verifies the optional Lambda-render webpack
+// bundle directory is packed at archive root under "site/<...>", mirroring
+// the public/ + music/ pattern. site/ is what powers the Download MP4
+// button in the Videos tab; absence is silent (publish + the in-browser
+// player work without it).
+func TestCreateVideoArchiveSite(t *testing.T) {
+	tests := []struct {
+		name        string
+		siteFiles   map[string]string // relative path under site/ → content
+		wantMembers []string
+		notMembers  []string
+	}{
+		{
+			name:        "no site dir: archive omits site entries",
+			siteFiles:   nil,
+			wantMembers: []string{"composition.mjs", "compositions.json"},
+			notMembers:  []string{"site/index.html", "site/static/js/main.js"},
+		},
+		{
+			name: "flat site bundle: index.html + js chunk packed at archive root",
+			siteFiles: map[string]string{
+				"index.html":         "<!doctype html><html></html>",
+				"bundle.js":          "/* webpack chunk */",
+			},
+			wantMembers: []string{
+				"composition.mjs",
+				"compositions.json",
+				"site/index.html",
+				"site/bundle.js",
+			},
+			notMembers: []string{"index.html", "bundle.js"},
+		},
+		{
+			name: "nested site bundle: subdirectories preserved under site/",
+			siteFiles: map[string]string{
+				"index.html":            "<!doctype html><html></html>",
+				"static/js/main.js":     "/* main chunk */",
+				"static/js/runtime.js":  "/* runtime */",
+				"static/css/style.css":  ".x{}",
+				"static/media/font.woff": "fakefont",
+			},
+			wantMembers: []string{
+				"composition.mjs",
+				"compositions.json",
+				"site/index.html",
+				"site/static/js/main.js",
+				"site/static/js/runtime.js",
+				"site/static/css/style.css",
+				"site/static/media/font.woff",
+			},
+			notMembers: []string{"index.html", "static/js/main.js"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			compMjs := filepath.Join(dir, "composition.mjs")
+			compJSON := filepath.Join(dir, "compositions.json")
+			if err := os.WriteFile(compMjs, []byte("export default () => null;"), 0o644); err != nil {
+				t.Fatalf("write composition.mjs: %v", err)
+			}
+			if err := os.WriteFile(compJSON, []byte(`[{"id":"t","durationInFrames":1,"fps":30,"width":16,"height":9}]`), 0o644); err != nil {
+				t.Fatalf("write compositions.json: %v", err)
+			}
+
+			if tt.siteFiles != nil {
+				for rel, content := range tt.siteFiles {
+					full := filepath.Join(dir, "site", rel)
+					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+						t.Fatalf("mkdir for site/%s: %v", rel, err)
+					}
+					if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+						t.Fatalf("write site/%s: %v", rel, err)
+					}
+				}
+			}
+
+			publicDir := filepath.Join(dir, "public")
+
+			buf, fileCount, err := createVideoArchive(compMjs, compJSON, publicDir)
+			if err != nil {
+				t.Fatalf("createVideoArchive: %v", err)
+			}
+
+			members := readTarGzMembers(t, buf)
+			memberSet := make(map[string]bool, len(members))
+			for _, m := range members {
+				memberSet[m] = true
+			}
+			for _, want := range tt.wantMembers {
+				if !memberSet[want] {
+					t.Errorf("expected member %q, got %v", want, members)
+				}
+			}
+			for _, avoid := range tt.notMembers {
+				if memberSet[avoid] {
+					t.Errorf("unexpected member %q, got %v", avoid, members)
+				}
+			}
+			if fileCount != len(members) {
+				t.Errorf("fileCount = %d but archive has %d members (%v)", fileCount, len(members), members)
+			}
+		})
+	}
+}
+
 // readTarGzMembers returns the names of every regular file inside a
 // gzip-compressed tarball. Order preserved (tarball is small enough that
 // tests compare via a member-set, not order).

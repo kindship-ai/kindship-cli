@@ -69,13 +69,21 @@ var videoPublishCmd = &cobra.Command{
   <dir>/poster.png         — optional, used as the Videos tab thumbnail
                              (produced by 'npx remotion still <id> poster.png --frame=<N> --scale=0.5');
                              only the exact lowercase filename 'poster.png' at root is recognized
+  <dir>/site/              — optional, full Remotion webpack bundle for Lambda
+                             MP4 rendering (produced by 'npx remotion bundle
+                             ./src/index.ts --out-dir site/'). Required only
+                             if you want the "Download MP4" button on the
+                             Videos tab; publish + the in-browser player
+                             work without it. ADDITIONAL to composition.mjs,
+                             not a replacement.
 
 By default <dir> is /workspace/videos/<slug>/ (or the current directory if
 you're standing in it). Override with --dir.
 
-Note: do NOT use 'npx remotion bundle' (webpack server-side render output).
-The Kindship player loads composition.mjs directly via dynamic-import; webpack
-chunks are not browser-importable as ESM.
+Note on bundlers: composition.mjs MUST come from esbuild (the Kindship player
+loads it directly via dynamic-import; webpack chunks are not browser-
+importable as ESM). The site/ directory is the orthogonal webpack output
+used only by AWS Lambda for MP4 export.
 
 Examples:
   kindship video publish milestone-1-retro --title "Milestone 1 retro"
@@ -311,12 +319,17 @@ func validateSlug(slug string) error {
 //   - every regular file under <slug-dir>/music/ (if present), placed at
 //     "music/<...>" — the signature-audio sidecar referenced by compositions
 //     via `new URL('./music/<slug>.mp3', import.meta.url).href`.
+//   - every regular file under <slug-dir>/site/ (if present), placed at
+//     "site/<...>" — the optional webpack bundle for Lambda MP4 rendering
+//     (produced by `npx remotion bundle ./src/index.ts --out-dir site/`).
+//     Server uploads this to S3 (not Supabase) for Remotion Lambda to
+//     fetch when a user clicks Download MP4. Missing site/ is silent.
 //   - optional poster.png at the archive root (a sibling of composition.mjs),
 //     used as the Videos tab thumbnail — only the exact lowercase filename
 //     "poster.png" is recognized; missing poster is silent (not an error).
 //
-// Webpack chunks from `npx remotion bundle` are deliberately NOT included.
-// The server expects composition.mjs as the player entry point.
+// composition.mjs is the player entry point (esbuild ESM); site/ is the
+// orthogonal webpack output used only by Lambda. Both can ship together.
 func createVideoArchive(compositionMjs, compositionsFile, publicDir string) (*bytes.Buffer, int, error) {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -400,6 +413,38 @@ func createVideoArchive(compositionMjs, compositionsFile, publicDir string) (*by
 		})
 		if walkErr != nil {
 			return nil, 0, fmt.Errorf("failed to walk music dir: %w", walkErr)
+		}
+	}
+
+	// Optional: walk <slug-dir>/site/ — webpack bundle for Remotion Lambda
+	// MP4 rendering. Produced by `npx remotion bundle ./src/index.ts
+	// --out-dir site/`. Server uploads this to its own S3 bucket; absence
+	// just means no MP4 download for this revision (publish still
+	// succeeds, player works from composition.mjs as before). Mirrors
+	// the public/ walk's hygiene: skip symlinks and non-regular files.
+	siteDir := filepath.Join(filepath.Dir(compositionMjs), "site")
+	if info, err := os.Stat(siteDir); err == nil && info.IsDir() {
+		baseDir := filepath.Dir(siteDir) // <slug-dir>
+		walkErr := filepath.Walk(siteDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 || info.IsDir() || !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(baseDir, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel) // "site/<...>"
+			if err := writeTarEntry(tw, rel, info, path); err != nil {
+				return err
+			}
+			fileCount++
+			return nil
+		})
+		if walkErr != nil {
+			return nil, 0, fmt.Errorf("failed to walk site dir: %w", walkErr)
 		}
 	}
 
