@@ -375,13 +375,18 @@ func renderStills(dir, compositionID string, picks []framePick, framesDir string
 		// Filename uses the index so sort order matches the picks slice
 		// ordering; timestamp lives in the label we ship to Gemini.
 		out := filepath.Join(framesDir, fmt.Sprintf("%03d.png", i))
+		// `npx remotion still` signature is positional: entry, composition,
+		// output. --frame is a flag. The composition can't be passed via
+		// --composition (that flag doesn't exist on `still`); putting the
+		// PNG path before the composition id makes Remotion try to load
+		// it as the composition and errors out.
 		args := []string{
 			"remotion",
 			"still",
 			"./src/index.ts",
-			"--composition", compositionID,
-			"--frame", strconv.Itoa(p.frame),
+			compositionID,
 			out,
+			fmt.Sprintf("--frame=%d", p.frame),
 		}
 		cmd := exec.Command("npx", args...)
 		cmd.Dir = dir
