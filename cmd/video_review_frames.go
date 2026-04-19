@@ -45,15 +45,15 @@ const defaultEvenFrameCount = 6
 const maxAutoFrames = 6
 
 // sceneFrameOffsets defines where within each scene's duration we sample
-// frames. Pure interior — never within 25% of either scene boundary —
+// frames. Pure interior — never within 40% of either scene boundary —
 // to avoid landing on in-fades, out-fades, or cross-fade blanks between
-// scenes. 2 picks per scene at 30% and 70% of duration: enough to
-// catch within-scene layout issues without overloading the renderer.
+// scenes. ONE pick per scene at the midpoint (0.5) so totals stay
+// under the container's observed ≈7-cycle Chromium ceiling.
 //
-// (Earlier revs used 0/0.25/0.5/0.75 then 0.2/0.4/0.6/0.8 — both 24+
-// frames. The smaller batch fits Akasha-sized container memory; agents
-// who need denser sampling can pass --frames explicitly.)
-var sceneFrameOffsets = []float64{0.3, 0.7}
+// (Earlier revs sampled 2-4 frames per scene; both overshot container
+// budget on Akasha-sized agents. Agents needing denser sampling pass
+// --frames explicitly.)
+var sceneFrameOffsets = []float64{0.5}
 
 // renderScale shrinks each rendered still to this fraction of the
 // composition's native resolution. 0.33 → 1080p source becomes 360p,
