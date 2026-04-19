@@ -169,11 +169,58 @@ func runUserMessagingReport(_ *cobra.Command, args []string) error {
 	})
 }
 
+// formatIssuePath renders a Zod-style path (mixed strings + numeric array
+// indices) into a single human-readable field reference. String segments
+// are joined with '.', numeric segments (any json.Number / float64 / int)
+// are attached as '[N]'. Unknown segments fall back to fmt.Sprintf %v.
+func formatIssuePath(path []any) string {
+	var b strings.Builder
+	for _, seg := range path {
+		switch v := seg.(type) {
+		case string:
+			if b.Len() > 0 {
+				b.WriteByte('.')
+			}
+			b.WriteString(v)
+		case float64:
+			fmt.Fprintf(&b, "[%d]", int64(v))
+		case int:
+			fmt.Fprintf(&b, "[%d]", v)
+		case int64:
+			fmt.Fprintf(&b, "[%d]", v)
+		case json.Number:
+			b.WriteByte('[')
+			b.WriteString(v.String())
+			b.WriteByte(']')
+		default:
+			if b.Len() > 0 {
+				b.WriteByte('.')
+			}
+			fmt.Fprintf(&b, "%v", v)
+		}
+	}
+	return b.String()
+}
+
 // ---- send helper shared by ask/choice/approve/report ----
 
 func sendUserMessage(req api.UserMessagingSendRequest) error {
 	if req.Agency == "" {
 		return fmt.Errorf("--agency is required (one of 12 canonical agencies or 'other')")
+	}
+	// Client-side length guards mirror the server Zod schema at
+	// apps/web/app/api/cli/user-messaging/send/route.ts. Rune-length is used
+	// so multi-byte characters count the same way Zod counts them. Catching
+	// this here saves the agent an HTTP round-trip + "Invalid request body"
+	// roulette.
+	if n := len([]rune(req.Tldr)); n > 140 {
+		return fmt.Errorf("--tldr too long: %d chars (max 140)", n)
+	}
+	if n := len([]rune(req.OnAnswerNote)); n > 2048 {
+		return fmt.Errorf("--on-answer too long: %d chars (max 2048)", n)
+	}
+	if n := len([]rune(req.Title)); n > 200 {
+		return fmt.Errorf("--title too long: %d chars (max 200)", n)
 	}
 	ctx, err := auth.GetAuthContext()
 	if err != nil {
@@ -217,6 +264,23 @@ func sendUserMessage(req api.UserMessagingSendRequest) error {
 		return fmt.Errorf("failed to parse response (status %d): %s", statusCode, string(respBody))
 	}
 	if statusCode >= 400 {
+		// When the server returns structured per-field issues, surface them
+		// inline so the agent sees which field failed without a round-trip.
+		if len(out.Details) > 0 {
+			parts := make([]string, 0, len(out.Details))
+			for _, d := range out.Details {
+				field := formatIssuePath(d.Path)
+				if field == "" {
+					parts = append(parts, d.Message)
+				} else {
+					parts = append(parts, fmt.Sprintf("%s: %s", field, d.Message))
+				}
+			}
+			if out.Error != "" {
+				return fmt.Errorf("send failed: %s — %s", out.Error, strings.Join(parts, "; "))
+			}
+			return fmt.Errorf("send failed: %s", strings.Join(parts, "; "))
+		}
 		if out.Error != "" {
 			return fmt.Errorf("send failed: %s", out.Error)
 		}

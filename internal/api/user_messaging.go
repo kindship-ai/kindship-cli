@@ -79,6 +79,17 @@ type UserMessagingSendRequest struct {
 	OnAnswerNote string `json:"on_answer_note,omitempty"`
 }
 
+// ValidationIssue mirrors a single Zod issue returned by the server when a
+// request body fails schema validation. Path is the field path — Zod emits
+// it as a heterogeneous array of strings and numeric array indices
+// (e.g. ["choices", 0, "value"]), so the Go side stores each segment as
+// any and stringifies on render.
+type ValidationIssue struct {
+	Path    []any  `json:"path"`
+	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
+}
+
 type UserMessagingSendResponse struct {
 	// On success: suppressed=false, id=<uuid>.
 	// On silent-mode suppression: suppressed=true, id=null, reason="silent".
@@ -87,6 +98,10 @@ type UserMessagingSendResponse struct {
 	Reason     string  `json:"reason,omitempty"`
 	Agency     string  `json:"agency,omitempty"`
 	Error      string  `json:"error,omitempty"`
+	// Structured per-field validation issues surfaced by the server on 400s.
+	// Older servers omit this field. When present the CLI renders each
+	// issue inline so agents see which field broke without a round-trip.
+	Details []ValidationIssue `json:"details,omitempty"`
 	// Phase B response fields. Urgency echoes the send request's value (or
 	// 'daily' default). DeliveryPolicy is stub 'push_now' in Phase B and
 	// gains real routing values in Phase C ('push_now' | 'deferred_push' |
