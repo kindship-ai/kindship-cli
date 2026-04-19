@@ -32,8 +32,17 @@ var (
 	videoReviewFramesKeep    bool
 )
 
-const defaultFramesPerScene = 2
+const defaultFramesPerScene = 1
 const defaultEvenFrameCount = 6
+
+// maxAutoFrames caps the total number of frames auto-selected via
+// scenes.json / scene-extraction / evenly-spaced fallback. Empirically,
+// Akasha-sized containers can reliably spawn a fresh Chromium ≈7 times
+// in a row before fd/zombie-process accumulation prevents the 8th
+// openBrowser (observed across v0.1.67–0.1.69). 6 leaves a safety
+// margin. Agents needing denser sampling pass --frames explicitly,
+// which bypasses this cap (and accepts the responsibility for fit).
+const maxAutoFrames = 6
 
 // sceneFrameOffsets defines where within each scene's duration we sample
 // frames. Pure interior — never within 25% of either scene boundary —
@@ -254,15 +263,20 @@ func pickFrames(
 
 	scenesPath := filepath.Join(dir, "scenes.json")
 	if _, err := os.Stat(scenesPath); err == nil {
-		return picksFromScenes(scenesPath, c.FPS, c.DurationInFrames)
+		picks, err := picksFromScenes(scenesPath, c.FPS, c.DurationInFrames)
+		if err != nil {
+			return nil, err
+		}
+		return downsamplePicks(picks, maxAutoFrames), nil
 	}
 
 	// Auto-extract from src/. Best-effort — falls back to evenly-spaced
 	// when the composition uses computed Sequence props or a non-
 	// conventional scene structure.
 	if scenes, _ := extractScenesFromSrc(dir); len(scenes) > 0 {
+		scenes = downsampleScenes(scenes, maxAutoFrames/defaultFramesPerScene)
 		if !isJSONFormat() {
-			fmt.Printf("Auto-detected %d scene(s) from src/ — sampling 4 frames per scene\n", len(scenes))
+			fmt.Printf("Auto-detected scenes from src/ — sampling %d frame(s) per scene across %d scene(s)\n", defaultFramesPerScene, len(scenes))
 		}
 		return picksFromSceneMetas(scenes, c.FPS, c.DurationInFrames), nil
 	}
@@ -271,6 +285,44 @@ func pickFrames(
 		fmt.Printf("No scenes detected — sampling %d evenly-spaced frames\n", defaultEvenFrameCount)
 	}
 	return evenlySpacedPicks(c.FPS, c.DurationInFrames, defaultEvenFrameCount), nil
+}
+
+// downsamplePicks trims the pick list to <=cap entries by keeping
+// evenly-spaced samples. Used when scenes.json or auto-detected scenes
+// yield more frames than the container can render in one run.
+func downsamplePicks(picks []framePick, cap int) []framePick {
+	if cap <= 0 || len(picks) <= cap {
+		return picks
+	}
+	out := make([]framePick, 0, cap)
+	step := float64(len(picks)-1) / float64(cap-1)
+	for i := 0; i < cap; i++ {
+		idx := int(float64(i)*step + 0.5)
+		if idx >= len(picks) {
+			idx = len(picks) - 1
+		}
+		out = append(out, picks[idx])
+	}
+	return out
+}
+
+// downsampleScenes trims the scene list to <=cap scenes by keeping
+// evenly-spaced entries. Applied BEFORE sampling frames-per-scene so
+// the total frame count stays within the container's render budget.
+func downsampleScenes(scenes []sceneMeta, cap int) []sceneMeta {
+	if cap <= 0 || len(scenes) <= cap {
+		return scenes
+	}
+	out := make([]sceneMeta, 0, cap)
+	step := float64(len(scenes)-1) / float64(cap-1)
+	for i := 0; i < cap; i++ {
+		idx := int(float64(i)*step + 0.5)
+		if idx >= len(scenes) {
+			idx = len(scenes) - 1
+		}
+		out = append(out, scenes[idx])
+	}
+	return out
 }
 
 // picksFromSceneMetas converts in-memory scene metas to framePicks
