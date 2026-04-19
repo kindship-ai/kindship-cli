@@ -264,7 +264,12 @@ func buildAndUploadSite(ctx *auth.Context, agentID, slug, dir, videoID, revision
 	siteDir := filepath.Join(dir, "site")
 	compositionMjs := filepath.Join(dir, "composition.mjs")
 
-	if needsBundle(siteDir, compositionMjs) {
+	// --force always re-bundles. Otherwise rebundle only if site/ is
+	// missing or older than composition.mjs. Re-bundling on --force
+	// matters because the CLI may have rolled forward to a Remotion
+	// version with a different bundle layout (e.g. publicPath fix) —
+	// agents typing --force expect a clean rebuild, not just re-upload.
+	if videoRenderForce || needsBundle(siteDir, compositionMjs) {
 		if !isJSONFormat() {
 			fmt.Println("Bundling renderer with `npx remotion bundle`...")
 		}
@@ -328,8 +333,13 @@ func needsBundle(siteDir, compositionMjs string) bool {
 // runRemotionBundle invokes the Remotion CLI to produce a webpack
 // bundle. Streams output so the agent sees progress; falls back to
 // captured stderr in the error message when the command fails.
+//
+// --public-path="./" makes index.html load bundle.js relative to its
+// own URL — required because each revision's site lives at a unique
+// S3 key prefix (sites-<env>/<rev>/) and an absolute "/bundle.js"
+// would resolve to the bucket root and 404. Requires Remotion >= 4.0.127.
 func runRemotionBundle(dir, siteDir string) error {
-	cmd := exec.Command("npx", "remotion", "bundle", "./src/index.ts", "--out-dir", siteDir)
+	cmd := exec.Command("npx", "remotion", "bundle", "./src/index.ts", "--out-dir", siteDir, "--public-path=./")
 	cmd.Dir = dir
 	if isJSONFormat() {
 		// JSON callers want a parseable result on stdout — silence the bundler.
