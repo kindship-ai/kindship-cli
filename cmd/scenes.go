@@ -47,6 +47,9 @@ func extractScenesFromSrc(dir string) ([]sceneMeta, error) {
 		if scenes := parseSceneTimeline(src); len(scenes) > 0 {
 			return scenes, nil
 		}
+		if scenes := parseParallelArrays(src); len(scenes) > 0 {
+			return scenes, nil
+		}
 		if scenes := parseLiteralSequences(src); len(scenes) > 0 {
 			return scenes, nil
 		}
@@ -103,6 +106,99 @@ func parseSceneTimeline(src string) []sceneMeta {
 		cumulativeFrom += duration
 	}
 	return scenes
+}
+
+// parseParallelArrays detects the split-arrays convention:
+//
+//	const sceneDurations = [180, 240, 210, ...];
+//	const scenes = [OpeningScene, ProblemScene, ...];
+//
+// Pairs them by index — if their lengths match, duration[i] and name[i]
+// become scene i. Scene name is the identifier with any trailing
+// "Scene" stripped so "OpeningScene" → "Opening". Works with either
+// array declared first; detection is by shape, not order.
+func parseParallelArrays(src string) []sceneMeta {
+	// A duration array: `const <name> = [<numbers...>]`. All entries
+	// must be plain integers (trailing commas + whitespace tolerated).
+	durationsRe := regexp.MustCompile(`(?si)const\s+\w*duration\w*\s*(?::[^=]+)?=\s*\[([^\]]+)\]\s*;`)
+	durMatch := durationsRe.FindStringSubmatch(src)
+	if len(durMatch) < 2 {
+		return nil
+	}
+	durations := parseNumericArray(durMatch[1])
+	if len(durations) == 0 {
+		return nil
+	}
+
+	// An identifier array: `const <name> = [Ident1, Ident2, ...]`.
+	// Excludes anything that looks like a string literal or object so
+	// we don't accidentally pair with a label array.
+	namesRe := regexp.MustCompile(`(?si)const\s+\w*scene\w*\s*(?::[^=]+)?=\s*\[([^\]]+)\]\s*;`)
+	for _, nameMatch := range namesRe.FindAllStringSubmatch(src, -1) {
+		if len(nameMatch) < 2 {
+			continue
+		}
+		names := parseIdentifierArray(nameMatch[1])
+		if len(names) != len(durations) {
+			continue
+		}
+		scenes := make([]sceneMeta, 0, len(names))
+		cum := 0
+		for i, name := range names {
+			trimmed := strings.TrimSuffix(name, "Scene")
+			if trimmed == "" {
+				trimmed = name
+			}
+			scenes = append(scenes, sceneMeta{
+				Name:             trimmed,
+				From:             cum,
+				DurationInFrames: durations[i],
+			})
+			cum += durations[i]
+		}
+		return scenes
+	}
+	return nil
+}
+
+// parseNumericArray splits a comma-separated list of integer literals.
+// Returns nil if any entry isn't a plain integer — prevents partial
+// pairing with a mixed array that happens to start with numbers.
+func parseNumericArray(body string) []int {
+	parts := strings.Split(body, ",")
+	out := make([]int, 0, len(parts))
+	for _, raw := range parts {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		n, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return nil
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// parseIdentifierArray splits a comma-separated list of identifiers.
+// Returns nil if any entry isn't a bare identifier (so strings, calls,
+// nested arrays don't accidentally pair with a duration array).
+func parseIdentifierArray(body string) []string {
+	parts := strings.Split(body, ",")
+	out := make([]string, 0, len(parts))
+	identRe := regexp.MustCompile(`^[A-Za-z_$][\w$]*$`)
+	for _, raw := range parts {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if !identRe.MatchString(trimmed) {
+			return nil
+		}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 // parseLiteralSequences finds <Sequence from={N} durationInFrames={M}>

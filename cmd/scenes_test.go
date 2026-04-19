@@ -93,6 +93,51 @@ func TestParseSceneTimeline_FallbackName(t *testing.T) {
 	}
 }
 
+func TestParseParallelArrays_AkashaPattern(t *testing.T) {
+	src := `
+		const sceneDurations = [180, 240, 210, 210, 210, 240, 240, 240, 240, 240, 240, 270];
+		const sceneStarts = sceneDurations.reduce<number[]>((acc, duration, index) => { ... }, []);
+		const scenes = [
+			OpeningScene,
+			ProblemScene,
+			UndividedScene,
+			PrinciplesScene,
+			StakesScene,
+			AkashaScene,
+			DocumentsScene,
+			WorkScene,
+			MethodScene,
+			ArchiveScene,
+			ForwardScene,
+			ClosingScene,
+		];
+	`
+	scenes := parseParallelArrays(src)
+	if len(scenes) != 12 {
+		t.Fatalf("expected 12 scenes, got %d: %+v", len(scenes), scenes)
+	}
+	if scenes[0].Name != "Opening" || scenes[0].DurationInFrames != 180 || scenes[0].From != 0 {
+		t.Errorf("scene[0]: want Opening/180/0, got %+v", scenes[0])
+	}
+	if scenes[1].Name != "Problem" || scenes[1].From != 180 {
+		t.Errorf("scene[1]: want Problem at from=180, got %+v", scenes[1])
+	}
+	if scenes[11].Name != "Closing" || scenes[11].DurationInFrames != 270 {
+		t.Errorf("scene[11]: want Closing/270, got %+v", scenes[11])
+	}
+}
+
+func TestParseParallelArrays_LengthMismatch(t *testing.T) {
+	src := `
+		const sceneDurations = [100, 200, 300];
+		const scenes = [A, B, C, D];
+	`
+	scenes := parseParallelArrays(src)
+	if scenes != nil {
+		t.Errorf("expected nil when lengths differ, got %+v", scenes)
+	}
+}
+
 func TestParseSceneTimeline_NoMatch(t *testing.T) {
 	src := `const stageLabels = ["MAP", "RELATE"];
 		function App() { return <div />; }`
