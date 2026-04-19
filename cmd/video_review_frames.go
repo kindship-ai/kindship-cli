@@ -449,19 +449,21 @@ type stillRenderArgs struct {
 	Quiet         bool             `json:"quiet"`
 }
 
-// stillRendererScript is the inline Node ESM script that bundles ONCE,
-// opens ONE Chromium, and renders N stills against it. Massively
-// reduces peak memory vs spawning `npx remotion still` per frame:
+// stillRendererScript is the inline Node ESM script that bundles ONCE
+// then renders each still in its OWN fresh Chromium instance. Cycling
+// the browser per-frame makes peak memory truly O(1) against the
+// number of frames — Chromium's state never accumulates across
+// renders, no matter how many frames the agent requests.
 //
-//   - 1 esbuild bundle (≈50 MB transient) instead of N (≈50 MB each)
-//   - 1 Chromium (≈150 MB persistent) instead of N (≈150 MB each)
-//   - 1 Node heap (≈30 MB) instead of N
+// Cost: ≈1s of browser-startup overhead per frame (vs ≈0.1s for
+// shared browser). Accepted for deterministic memory bounds.
 //
-// For 24 frames that's ≈5 GB of peak memory NOT allocated, which keeps
-// the agent container alive instead of OOM-killed mid-review.
+// The bundle output is reused across all renders — it's a served URL
+// (file path or http URL), not an in-memory structure, so reusing it
+// doesn't violate the O(1) property.
 //
-// Reads its config from process.argv[2] as JSON. Writes nothing to
-// stdout unless cfg.quiet=false. Exits non-zero on first render error.
+// Reads its config from process.argv[2] as JSON. Writes to stderr
+// only if !cfg.quiet. Exits non-zero on first render error.
 const stillRendererScript = `import {bundle} from '@remotion/bundler';
 import {selectComposition, openBrowser, renderStill} from '@remotion/renderer';
 import path from 'node:path';
@@ -475,20 +477,20 @@ const serveUrl = await bundle({
   onProgress: () => {},
 });
 
-log('opening browser (one-time)…');
-const browser = await openBrowser('chrome', {logLevel: 'error'});
-
-try {
-  log('selecting composition…');
-  const composition = await selectComposition({
-    serveUrl,
-    id: cfg.compositionId,
-    puppeteerInstance: browser,
-  });
-
-  for (let i = 0; i < cfg.frames.length; i++) {
-    const f = cfg.frames[i];
-    log('  [' + (i + 1) + '/' + cfg.frames.length + '] ' + f.label + ' frame=' + f.frame);
+// Per-frame browser cycle — peak memory is O(1) in cfg.frames.length
+// because Chromium state resets between renders. 'composition' also
+// comes from selectComposition() which holds a reference to the
+// puppeteerInstance, so we re-select inside each browser scope.
+for (let i = 0; i < cfg.frames.length; i++) {
+  const f = cfg.frames[i];
+  log('  [' + (i + 1) + '/' + cfg.frames.length + '] ' + f.label + ' frame=' + f.frame);
+  const browser = await openBrowser('chrome', {logLevel: 'error'});
+  try {
+    const composition = await selectComposition({
+      serveUrl,
+      id: cfg.compositionId,
+      puppeteerInstance: browser,
+    });
     await renderStill({
       composition,
       serveUrl,
@@ -499,9 +501,9 @@ try {
       scale: cfg.scale,
       puppeteerInstance: browser,
     });
+  } finally {
+    await browser.close().catch(() => {});
   }
-} finally {
-  await browser.close().catch(() => {});
 }
 `
 
