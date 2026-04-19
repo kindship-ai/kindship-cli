@@ -85,9 +85,13 @@ func runExecute(cmd *cobra.Command, args []string) error {
 		log.Error("KINDSHIP_SERVICE_KEY not provided", nil)
 		return fmt.Errorf("KINDSHIP_SERVICE_KEY is required (use --service-key flag or KINDSHIP_SERVICE_KEY environment variable)")
 	}
-	if resume && sessionID == "" {
-		return fmt.Errorf("--resume requires --session-id")
-	}
+	// --resume semantics per inner-loop CLI:
+	//   Claude: --resume requires --session-id (caller-supplied id).
+	//   codex/gemini/opencode: --resume alone means "continue last"
+	//     (CLI-generated ids). The buildCliArgs switch in
+	//     internal/executor/agent.go translates per CLI.
+	// No validation required here — invalid combos fail at the inner CLI
+	// layer with a clearer CLI-specific error.
 
 	// Create API client
 	client := api.NewClient(apiURL, verbose)
@@ -710,6 +714,6 @@ func init() {
 	runCmd.Flags().StringVar(&serviceKey, "service-key", "", "Service key for authentication (defaults to KINDSHIP_SERVICE_KEY env var)")
 	runCmd.Flags().StringVar(&apiURL, "api-url", "", "API base URL (defaults to KINDSHIP_API_URL env var or https://kindship.ai)")
 	runCmd.Flags().StringVar(&sessionID, "session-id", "", "Claude Code session ID for session continuity")
-	runCmd.Flags().BoolVar(&resume, "resume", false, "Resume an existing Claude Code session (requires --session-id)")
+	runCmd.Flags().BoolVar(&resume, "resume", false, "Resume a session. With --session-id: Claude (resume that id). Without: non-Claude CLIs pick their 'continue last' flag.")
 	runCmd.Flags().BoolVar(&sessionRetryOnConflict, "session-retry-on-conflict", false, "Retry up to 3x with jittered backoff on 'Session ID already in use' (Claude only; see internal/executor/agent.go)")
 }
