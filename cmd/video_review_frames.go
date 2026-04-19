@@ -212,9 +212,17 @@ func loadComposition(path string) (*compositionMeta, error) {
 	return &c, nil
 }
 
-// pickFrames implements the precedence: explicit --frames > scenes.json
-// (4 per scene at 0/0.25/0.5/0.75) > 8 evenly-spaced fallback. Returns
-// frames sorted by absolute frame number with deduped timestamps.
+// pickFrames implements the precedence:
+//
+//  1. --frames "0:00,..."     → use exactly those (explicit wins)
+//  2. <dir>/scenes.json       → 4 frames per scene at 0/0.25/0.5/0.75
+//  3. extract from src/       → same shape, but derived from
+//                               sceneTimeline / literal Sequence regex
+//  4. 8 evenly-spaced fallback
+//
+// Step 3 is the auto-discovery path so agents using the conventional
+// patterns get scene-aware sampling without hand-authoring scenes.json.
+// Returns frames sorted by absolute frame number with deduped timestamps.
 func pickFrames(
 	dir string,
 	c *compositionMeta,
@@ -229,7 +237,45 @@ func pickFrames(
 		return picksFromScenes(scenesPath, c.FPS, c.DurationInFrames)
 	}
 
+	// Auto-extract from src/. Best-effort — falls back to evenly-spaced
+	// when the composition uses computed Sequence props or a non-
+	// conventional scene structure.
+	if scenes, _ := extractScenesFromSrc(dir); len(scenes) > 0 {
+		if !isJSONFormat() {
+			fmt.Printf("Auto-detected %d scene(s) from src/ — sampling 4 frames per scene\n", len(scenes))
+		}
+		return picksFromSceneMetas(scenes, c.FPS, c.DurationInFrames), nil
+	}
+
+	if !isJSONFormat() {
+		fmt.Printf("No scenes detected — sampling %d evenly-spaced frames\n", defaultEvenFrameCount)
+	}
 	return evenlySpacedPicks(c.FPS, c.DurationInFrames, defaultEvenFrameCount), nil
+}
+
+// picksFromSceneMetas converts in-memory scene metas to framePicks
+// using the same 0/0.25/0.5/0.75 strategy as picksFromScenes (which
+// reads from scenes.json). Kept separate so the auto-extract path
+// doesn't have to round-trip through disk.
+func picksFromSceneMetas(scenes []sceneMeta, fps, totalFrames int) []framePick {
+	offsets := []float64{0, 0.25, 0.5, 0.75}
+	picks := make([]framePick, 0, len(scenes)*defaultFramesPerScene)
+	for _, scene := range scenes {
+		if scene.DurationInFrames <= 0 {
+			continue
+		}
+		for _, o := range offsets {
+			frame := scene.From + int(float64(scene.DurationInFrames)*o)
+			if frame < 0 {
+				frame = 0
+			}
+			if frame >= totalFrames {
+				frame = totalFrames - 1
+			}
+			picks = append(picks, framePick{timestamp: frameToTimestamp(frame, fps), frame: frame})
+		}
+	}
+	return dedupeAndSort(picks)
 }
 
 func parseExplicitFrames(arg string, fps, totalFrames int) ([]framePick, error) {

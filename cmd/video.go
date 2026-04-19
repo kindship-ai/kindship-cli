@@ -33,6 +33,7 @@ Subcommands:
   download  Fetch a previously-rendered MP4 from the cache
   review    Send the cached MP4 to Gemini 3.1 Pro for a scene-by-scene UI review
   review-frames  Render N stills locally + Gemini frame-level review (skips render)
+  scenes    Detect scenes in src/Composition.tsx (used by review-frames)
   delete    Delete a video (not yet implemented)
 
 See the kindship-video skill (~/.claude/skills/kindship-video/SKILL.md) for
