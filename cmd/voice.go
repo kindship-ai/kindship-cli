@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,8 +12,46 @@ import (
 
 	"github.com/kindship-ai/kindship-cli/internal/api"
 	"github.com/kindship-ai/kindship-cli/internal/auth"
+	"github.com/kindship-ai/kindship-cli/internal/llm"
+	"github.com/kindship-ai/kindship-cli/internal/prompts"
+	"github.com/kindship-ai/kindship-cli/internal/voice"
 
 	"github.com/spf13/cobra"
+)
+
+// Voice pipeline commands. Everything runs on the agent container,
+// calling LiteLLM (for Opus) and Gemini (for audio) directly. Vercel
+// only issues credentials via the short secrets endpoint — no CF in
+// the LLM path.
+//
+// Three subcommands live here:
+//   voice "<narrative>"                single-speaker monologue
+//   voice exact --voice ... --text ... verbatim render, no Opus
+//   voice multi "<narrative>"          two-speaker podcast
+
+const (
+	voiceSkillMono         = "kindship-voice"
+	voiceSkillPod          = "create-podcast"
+	voicePromptMonoIdeateS = "monologue-ideate-system"
+	voicePromptMonoIdeateU = "monologue-ideate-user"
+	voicePromptMonoAuthorS = "monologue-author-system"
+	voicePromptMonoAuthorU = "monologue-author-user"
+	voicePromptPodIdeateS  = "podcast-ideate-system"
+	voicePromptPodIdeateU  = "podcast-ideate-user"
+	voicePromptPodAuthorS  = "podcast-author-system"
+	voicePromptPodAuthorU  = "podcast-author-user"
+
+	voiceOpusModel            = "claude-opus-4-6"
+	voiceOpusMaxTokens        = 50000
+	voiceOpusThinkBudget      = 16000
+	voiceDefaultTargetMinutes = 3
+	voiceDefaultPodcastLength = "5-7 minutes"
+
+	voiceDefaultMonoDir   = "/workspace/documents/voice"
+	voiceDefaultPodDir    = "/workspace/documents/podcasts"
+	voiceStyleMdPath      = "/workspace/documents/STYLE.md"
+	voiceBatchPacingSecs  = 7
+	voiceDefaultSpeakerRole = "narrator"
 )
 
 var (
@@ -34,24 +69,20 @@ var (
 	voiceExactOutput    string
 	voiceExactOutputDir string
 
-	voiceMultiSlug            string
-	voiceMultiNarratorVoice   string
-	voiceMultiNarratorStyle   string
-	voiceMultiNarratorName    string
-	voiceMultiCompanionVoice  string
-	voiceMultiCompanionStyle  string
-	voiceMultiCompanionName   string
-	voiceMultiTargetLength    string
-	voiceMultiOutput          string
+	voiceMultiSlug           string
+	voiceMultiNarratorVoice  string
+	voiceMultiNarratorStyle  string
+	voiceMultiNarratorName   string
+	voiceMultiCompanionVoice string
+	voiceMultiCompanionStyle string
+	voiceMultiCompanionName  string
+	voiceMultiTargetLength   string
+	voiceMultiOutput         string
 )
 
-// voiceCmd doubles as the single-speaker monologue path (`kindship voice
-// "<narrative>"`) and the parent for `exact` / `multi` subcommands. Cobra
-// dispatches by subcommand name first, so the positional narrative only
-// kicks in when the first arg isn't "exact" or "multi".
 var voiceCmd = &cobra.Command{
 	Use:   "voice [narrative]",
-	Short: "Voice-over and podcast generation (Gemini + Opus)",
+	Short: "Voice-over and podcast generation (Opus × 2 + Gemini)",
 	Long: `Generate voice-over monologues and two-speaker podcasts via a
 three-stage pipeline: Opus plans, Opus writes, Gemini performs.
 
@@ -60,22 +91,21 @@ three-stage pipeline: Opus plans, Opus writes, Gemini performs.
   kindship voice multi  "<narrative>"   two-speaker podcast
 
 For the monologue path, pass the raw narrative as the positional arg.
-The server runs two Opus passes (ideate → author) and renders via Gemini
-Live using the narrator voice from your STYLE.md Sound section
-(overridable with --voice and --style).
+The CLI runs two Opus passes (ideate → author) via LiteLLM and
+renders via Gemini Live using the narrator voice from your STYLE.md
+Sound section (overridable with --voice and --style).
 
-Output lands at /workspace/documents/voice/<slug>.wav by default.
-Rate limit: 10 generations per minute per account.`,
+Output lands at /workspace/documents/voice/<slug>.wav by default.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runVoiceGenerate,
 }
 
 var voiceExactCmd = &cobra.Command{
 	Use:   "exact",
-	Short: "Render one or more texts verbatim — no Opus rewrite, dry voiceover mode",
+	Short: "Render one or more texts verbatim — no Opus rewrite",
 	Long: `Render each text with the prescribed voice + behavioral clause,
-verbatim. No Opus authoring — useful for pre-written voice-overs, video
-chapter markers, fixed hooks.
+verbatim. Useful for pre-written voice-overs, video chapter markers,
+fixed hooks.
 
 Single-text mode:
   kindship voice exact --voice Kore --style "gentle, measured" \
@@ -86,31 +116,28 @@ Batch mode (array of texts → directory of WAVs + manifest.json):
     --texts-file lines.json --output-dir voice-clips/
 
 lines.json shape: {"texts": ["line 1", "line 2", ...]}
-Batch mode paces requests 7 seconds apart to stay under rate limits.`,
+Batch mode paces requests 7 seconds apart.`,
 	RunE: runVoiceExact,
 }
 
 var voiceMultiCmd = &cobra.Command{
 	Use:   "multi <narrative>",
 	Short: "Generate a two-speaker podcast from a narrative",
-	Long: `Pass the raw narrative as the positional argument. The server
+	Long: `Pass the raw narrative as the positional argument. The CLI
 runs two Opus passes (ideate → author) to produce a two-speaker
 dialogue, then renders via Gemini TTS multi-speaker mode.
 
 Both speaker voices come from your STYLE.md Sound section (Narrator +
-Companion), pick them for deliberate contrast. Overridable with the
---narrator-* and --companion-* flags.
+Companion) by default — pick them for deliberate contrast. Override
+with the --narrator-* and --companion-* flags.
 
-Output lands at /workspace/documents/podcasts/<slug>.wav plus a sibling
-<slug>.meta.json with title + cold_open_note. Rate limit: 2 podcasts
-per minute per account.`,
+Output lands at /workspace/documents/podcasts/<slug>.wav plus a
+sibling <slug>.meta.json with title + cold_open_note.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runVoiceMulti,
 }
 
 func init() {
-	// voice (single-speaker / monologue) flags — attached to voiceCmd directly
-	// because the monologue is the parent's RunE, not a subcommand.
 	voiceCmd.Flags().StringVar(&voiceSlug, "slug", "", "output slug (kebab-case 2-63 chars); default derived from narrative")
 	voiceCmd.Flags().StringVar(&voiceVoice, "voice", "", "Gemini voice ID; default from STYLE.md narrator entry")
 	voiceCmd.Flags().StringVar(&voiceStyle, "style", "", "behavioral clause e.g. \"gravelly, measured, older scholar\"")
@@ -118,7 +145,6 @@ func init() {
 	voiceCmd.Flags().StringVar(&voiceOutput, "output", "", "destination path (default /workspace/documents/voice/<slug>.wav)")
 	voiceCmd.Flags().StringVar(&voiceFormat, "format", "text", "success summary format: text (default) or json")
 
-	// voice exact flags
 	voiceExactCmd.Flags().StringVar(&voiceExactVoice, "voice", "", "Gemini voice ID (required)")
 	voiceExactCmd.Flags().StringVar(&voiceExactStyle, "style", "", "behavioral clause (required)")
 	voiceExactCmd.Flags().StringVar(&voiceExactText, "text", "", "single text to render; mutually exclusive with --texts-file")
@@ -128,15 +154,14 @@ func init() {
 	_ = voiceExactCmd.MarkFlagRequired("voice")
 	_ = voiceExactCmd.MarkFlagRequired("style")
 
-	// voice multi (podcast) flags
 	voiceMultiCmd.Flags().StringVar(&voiceMultiSlug, "slug", "", "output slug (kebab-case 2-63 chars); default derived from narrative")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorVoice, "narrator-voice", "", "override STYLE.md narrator voice")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorStyle, "narrator-style", "", "override STYLE.md narrator behavioral clause")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorName, "narrator-name", "", "override narrator display name")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorName, "narrator-name", "", "override narrator display name (default: \"Host\")")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionVoice, "companion-voice", "", "override STYLE.md companion voice")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionStyle, "companion-style", "", "override STYLE.md companion behavioral clause")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionName, "companion-name", "", "override companion display name")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiTargetLength, "target-length", "", "target episode length e.g. \"5-7 minutes\"")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionName, "companion-name", "", "override companion display name (default: \"Guest\")")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiTargetLength, "target-length", "", "target episode length e.g. \"6-8 minutes\" (default \"5-7 minutes\")")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiOutput, "output", "", "destination path (default /workspace/documents/podcasts/<slug>.wav)")
 
 	voiceCmd.AddCommand(voiceExactCmd)
@@ -144,8 +169,8 @@ func init() {
 	rootCmd.AddCommand(voiceCmd)
 }
 
-// deriveSlug builds a kebab-case slug from the first 40 chars of text.
-// Falls back to "voice-<timestamp>" when the text has no usable tokens.
+// ---------- shared helpers ----------
+
 var slugSafeRune = regexp.MustCompile(`[^a-z0-9-]+`)
 
 func deriveSlug(text string) string {
@@ -162,25 +187,126 @@ func deriveSlug(text string) string {
 	return s
 }
 
+// voiceSecrets bundles the credentials the voice pipeline needs, one
+// pass through the short Vercel secrets endpoint.
+type voiceSecrets struct {
+	LiteLLMKey     string
+	LiteLLMBaseURL string
+	GeminiKey      string
+}
+
+// fetchVoiceSecrets pulls litellm + gemini secrets for the current
+// agent via the Vercel secrets endpoint. Requires container-mode
+// auth (service key) because the secrets endpoint is IP-whitelisted
+// to the agent server.
+func fetchVoiceSecrets(
+	authCtx *auth.Context, agentID string, needOpus bool,
+) (*voiceSecrets, error) {
+	if authCtx.Method != auth.AuthMethodServiceKey {
+		return nil, fmt.Errorf(
+			"kindship voice must run inside an agent container (secrets endpoint is IP-whitelisted)",
+		)
+	}
+	apiClient := api.NewClient(authCtx.APIBaseURL, false)
+	out := &voiceSecrets{}
+
+	gem, err := apiClient.FetchSecrets(agentID, "gemini", authCtx.Token)
+	if err != nil {
+		return nil, fmt.Errorf("fetch gemini secrets: %w", err)
+	}
+	out.GeminiKey = gem["GEMINI_API_KEY"]
+	if out.GeminiKey == "" {
+		return nil, fmt.Errorf("gemini secret missing GEMINI_API_KEY")
+	}
+
+	if needOpus {
+		lit, err := apiClient.FetchSecrets(agentID, "litellm", authCtx.Token)
+		if err != nil {
+			return nil, fmt.Errorf("fetch litellm secrets: %w", err)
+		}
+		out.LiteLLMKey = lit["LITELLM_VIRTUAL_KEY"]
+		out.LiteLLMBaseURL = lit["LITELLM_BASE_URL"]
+		if out.LiteLLMKey == "" || out.LiteLLMBaseURL == "" {
+			return nil, fmt.Errorf(
+				"litellm secrets missing LITELLM_VIRTUAL_KEY or LITELLM_BASE_URL — operator fix: run scripts/backfill-litellm-keys.ts",
+			)
+		}
+	}
+	return out, nil
+}
+
+// loadAgentSound reads the agent's STYLE.md from the container
+// filesystem and parses the Sound section. Returns an empty
+// StyleSound (both fields nil) if the file doesn't exist or can't be
+// parsed — callers require CLI overrides in that case.
+func loadAgentSound() voice.StyleSound {
+	raw, err := os.ReadFile(voiceStyleMdPath)
+	if err != nil {
+		return voice.StyleSound{}
+	}
+	return voice.ParseStyleMdSound(string(raw))
+}
+
+// validateSlug lives in cmd/video.go — shared across commands.
+
+// callOpus runs one streaming Anthropic request against LiteLLM with
+// thinking enabled + the model/max_tokens the voice pipeline uses.
+func callOpus(
+	ctx context.Context, secrets *voiceSecrets,
+	system, userMsg string,
+) (*llm.AnthropicResponse, error) {
+	return llm.CallAnthropicStreaming(ctx, secrets.LiteLLMBaseURL, secrets.LiteLLMKey,
+		llm.AnthropicRequest{
+			Model:     voiceOpusModel,
+			MaxTokens: voiceOpusMaxTokens,
+			System:    system,
+			Thinking: &llm.AnthropicThinking{
+				Type:         "enabled",
+				BudgetTokens: voiceOpusThinkBudget,
+			},
+			// Match the web-side request shape (probe 4 pinned) — keeps
+			// CLI-generated audio quality aligned with whatever the
+			// worker-driven strategy/voice path produces.
+			OutputConfig: &llm.AnthropicOutputConfig{Effort: "high"},
+			Messages: []llm.AnthropicMessage{{
+				Role: "user",
+				Content: []llm.AnthropicContent{{
+					Type: "text", Text: userMsg,
+				}},
+			}},
+		})
+}
+
+func writeWav(path string, pcm []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	wav := llm.PCMToWAV(pcm, 0)
+	if err := os.WriteFile(path, wav, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// ---------- voice (monologue) ----------
+
 func runVoiceGenerate(cmd *cobra.Command, args []string) error {
-	// With 0 args, show the help text — the parent command is also the
-	// dispatcher for the `exact` and `multi` subcommands.
 	if len(args) == 0 {
 		return cmd.Help()
 	}
-
-	ctx, err := auth.GetAuthContext()
-	if err != nil {
-		return err
-	}
-	agentID, err := ctx.RequireAgentID()
-	if err != nil {
-		return err
-	}
-
 	narrative := args[0]
 	if len(strings.TrimSpace(narrative)) < 20 {
 		return fmt.Errorf("narrative must be at least 20 chars")
+	}
+
+	ctx := context.Background()
+	authCtx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+	agentID, err := authCtx.RequireAgentID()
+	if err != nil {
+		return err
 	}
 
 	slug := voiceSlug
@@ -193,59 +319,156 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 
 	outputPath := voiceOutput
 	if outputPath == "" {
-		outputPath = filepath.Join("/workspace", "documents", "voice", slug+".wav")
+		outputPath = filepath.Join(voiceDefaultMonoDir, slug+".wav")
 	}
 
-	reqBody := api.VoiceGenerateRequest{
-		AgentID:       agentID,
-		Slug:          slug,
-		Narrative:     narrative,
-		VoiceOverride: voiceVoice,
-		StyleOverride: voiceStyle,
-		TargetMinutes: voiceTargetMinutes,
+	// Resolve the narrator profile — CLI flags win; otherwise STYLE.md.
+	sound := loadAgentSound()
+	narratorVoice := voiceVoice
+	narratorStyle := voiceStyle
+	var narratorPersonality string
+	if narratorVoice == "" && sound.Narrator != nil {
+		narratorVoice = sound.Narrator.Voice
 	}
-	resp, body, err := postVoiceAudio(ctx, "/api/cli/voice/generate", reqBody, 310*time.Second)
+	if narratorStyle == "" && sound.Narrator != nil {
+		narratorStyle = sound.Narrator.BehavioralClause
+	}
+	if sound.Narrator != nil {
+		narratorPersonality = sound.Narrator.Personality
+	}
+	if narratorVoice == "" || narratorStyle == "" {
+		return fmt.Errorf(
+			"narrator voice + behavioral clause required — either fill STYLE.md Sound section or pass --voice and --style",
+		)
+	}
+	if !voice.IsValidGeminiVoice(narratorVoice) {
+		return fmt.Errorf("voice %q is not in the Gemini roster", narratorVoice)
+	}
+
+	targetMinutes := voiceTargetMinutes
+	if targetMinutes <= 0 {
+		targetMinutes = voiceDefaultTargetMinutes
+	}
+
+	secrets, err := fetchVoiceSecrets(authCtx, agentID, true)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 
-	if err := writeAudioResponse(resp, body, outputPath); err != nil {
-		return fmt.Errorf("voice generate failed: %w", err)
+	profile := voice.SpeakerProfile{
+		Name:             "narrator",
+		Role:             "single speaker",
+		VoiceID:          narratorVoice,
+		BehavioralClause: narratorStyle,
+		Personality:      narratorPersonality,
+	}
+
+	// Pass 1 — ideate
+	ideateSystem, err := prompts.LoadAndRender(voiceSkillMono, voicePromptMonoIdeateS, map[string]string{
+		"target_minutes":  fmt.Sprintf("%d", targetMinutes),
+		"speaker_profile": voice.RenderSpeakerProfile(profile),
+	})
+	if err != nil {
+		return err
+	}
+	ideateUser, err := prompts.LoadAndRender(voiceSkillMono, voicePromptMonoIdeateU, map[string]string{
+		"narrative": narrative,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "→ ideate (Opus 4.6 + 16k thinking)…")
+	ideateResp, err := callOpus(ctx, secrets, ideateSystem, ideateUser)
+	if err != nil {
+		return fmt.Errorf("ideate: %w", err)
+	}
+	preScript := ideateResp.TextOutput()
+	if preScript == "" {
+		return fmt.Errorf("ideate returned empty text (stop_reason=%q)", ideateResp.StopReason)
+	}
+
+	// Pass 2 — author
+	authorSystem, err := prompts.LoadAndRender(voiceSkillMono, voicePromptMonoAuthorS, map[string]string{
+		"speaker_profile": voice.RenderSpeakerProfile(profile),
+		"pre_script_json": preScript,
+	})
+	if err != nil {
+		return err
+	}
+	authorUser, err := prompts.LoadAndRender(voiceSkillMono, voicePromptMonoAuthorU, map[string]string{
+		"narrative": narrative,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "→ author (Opus 4.6 + 16k thinking)…")
+	authorResp, err := callOpus(ctx, secrets, authorSystem, authorUser)
+	if err != nil {
+		return fmt.Errorf("author: %w", err)
+	}
+	script, err := voice.ParseMonologueScript(authorResp.TextOutput())
+	if err != nil {
+		return err
+	}
+
+	// Render via Gemini Live (single voice, audio-out).
+	geminiPrompt := voice.RenderMonologueGeminiPrompt(script, profile)
+	fmt.Fprintln(os.Stderr, "→ render (Gemini Live)…")
+	pcm, err := llm.SingleSpeakerLive(ctx, secrets.GeminiKey, narratorVoice, geminiPrompt)
+	if err != nil {
+		return fmt.Errorf("gemini live: %w", err)
+	}
+	if err := writeWav(outputPath, pcm); err != nil {
+		return err
 	}
 
 	if voiceFormat == "json" {
 		return printJSON(map[string]any{
-			"slug": slug,
-			"path": outputPath,
+			"slug":  slug,
+			"path":  outputPath,
+			"title": script.Title,
+			"beats": len(script.Beats),
 		})
 	}
-	fmt.Printf("Generated %s → %s\n", slug, outputPath)
+	fmt.Printf("Generated %s → %s (%d beats)\n", slug, outputPath, len(script.Beats))
 	return nil
 }
 
+// ---------- voice exact ----------
+
 func runVoiceExact(_ *cobra.Command, _ []string) error {
-	ctx, err := auth.GetAuthContext()
+	ctx := context.Background()
+	authCtx, err := auth.GetAuthContext()
 	if err != nil {
 		return err
 	}
-	agentID, err := ctx.RequireAgentID()
+	agentID, err := authCtx.RequireAgentID()
 	if err != nil {
 		return err
 	}
 
-	// Exactly one of --text or --texts-file is required.
 	hasSingle := voiceExactText != ""
 	hasBatch := voiceExactTextsFile != ""
 	if hasSingle == hasBatch {
 		return fmt.Errorf("exactly one of --text or --texts-file must be provided")
+	}
+	if hasSingle && strings.TrimSpace(voiceExactText) == "" {
+		return fmt.Errorf("--text must contain non-whitespace content")
+	}
+	if !voice.IsValidGeminiVoice(voiceExactVoice) {
+		return fmt.Errorf("voice %q is not in the Gemini roster", voiceExactVoice)
+	}
+
+	secrets, err := fetchVoiceSecrets(authCtx, agentID, false)
+	if err != nil {
+		return err
 	}
 
 	if hasSingle {
 		if voiceExactOutput == "" {
 			return fmt.Errorf("--output is required with --text")
 		}
-		bytesWritten, err := renderExactOne(ctx, agentID, voiceExactText, voiceExactOutput)
+		bytesWritten, err := renderExactOne(ctx, secrets.GeminiKey, voiceExactVoice, voiceExactStyle, voiceExactText, voiceExactOutput)
 		if err != nil {
 			return err
 		}
@@ -256,66 +479,81 @@ func runVoiceExact(_ *cobra.Command, _ []string) error {
 	if voiceExactOutputDir == "" {
 		return fmt.Errorf("--output-dir is required with --texts-file")
 	}
-	return runVoiceExactBatch(ctx, agentID, voiceExactTextsFile, voiceExactOutputDir)
+	return runVoiceExactBatch(ctx, secrets.GeminiKey, voiceExactTextsFile, voiceExactOutputDir)
 }
 
 func renderExactOne(
-	ctx *auth.Context,
-	agentID string,
-	text string,
-	outputPath string,
+	ctx context.Context,
+	geminiKey, voiceName, style, text, outputPath string,
 ) (int64, error) {
-	reqBody := api.VoiceExactRequest{
-		AgentID: agentID,
-		Voice:   voiceExactVoice,
-		Style:   voiceExactStyle,
-		Text:    text,
-	}
-	resp, body, err := postVoiceAudio(ctx, "/api/cli/voice/exact", reqBody, 150*time.Second)
+	prompt := voice.RenderExactPrompt(voiceName, style, text)
+	pcm, err := llm.SingleSpeakerLive(ctx, geminiKey, voiceName, prompt)
 	if err != nil {
+		return 0, fmt.Errorf("gemini live: %w", err)
+	}
+	if err := writeWav(outputPath, pcm); err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	return writeAudioResponseReturningBytes(resp, body, outputPath)
+	// Report the audio payload size (not the WAV wrapper size) so the
+	// number matches other tooling.
+	return int64(len(pcm)), nil
 }
 
-func runVoiceExactBatch(ctx *auth.Context, agentID, textsFile, outDir string) error {
+type voiceExactBatchFile struct {
+	Texts []string `json:"texts"`
+}
+
+type voiceExactManifestEntry struct {
+	Index int    `json:"index"`
+	Text  string `json:"text"`
+	File  string `json:"file"`
+	Bytes int64  `json:"bytes"`
+}
+
+type voiceExactManifest struct {
+	Voice   string                    `json:"voice"`
+	Style   string                    `json:"style"`
+	Entries []voiceExactManifestEntry `json:"entries"`
+}
+
+func runVoiceExactBatch(ctx context.Context, geminiKey, textsFile, outDir string) error {
 	raw, err := os.ReadFile(textsFile)
 	if err != nil {
-		return fmt.Errorf("failed to read --texts-file: %w", err)
+		return fmt.Errorf("read --texts-file: %w", err)
 	}
-	var batch api.VoiceExactBatchFile
+	var batch voiceExactBatchFile
 	if err := json.Unmarshal(raw, &batch); err != nil {
-		return fmt.Errorf("failed to parse --texts-file (expected {\"texts\":[...]}): %w", err)
+		return fmt.Errorf("parse --texts-file (expected {\"texts\":[...]}): %w", err)
 	}
 	if len(batch.Texts) == 0 {
 		return fmt.Errorf("--texts-file has no texts")
 	}
+	for i, t := range batch.Texts {
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("--texts-file entry %d is blank", i+1)
+		}
+	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create output dir: %w", err)
+		return fmt.Errorf("create output dir: %w", err)
 	}
 
-	manifest := api.VoiceExactManifest{
+	manifest := voiceExactManifest{
 		Voice:   voiceExactVoice,
 		Style:   voiceExactStyle,
-		Entries: make([]api.VoiceExactManifestEntry, 0, len(batch.Texts)),
+		Entries: make([]voiceExactManifestEntry, 0, len(batch.Texts)),
 	}
 
-	const pacing = 7 * time.Second
+	pacing := time.Duration(voiceBatchPacingSecs) * time.Second
 	for i, text := range batch.Texts {
 		slug := deriveSlug(text)
 		name := fmt.Sprintf("%02d-%s.wav", i+1, slug)
 		outPath := filepath.Join(outDir, name)
-
-		bytesWritten, err := renderExactOne(ctx, agentID, text, outPath)
+		bytesWritten, err := renderExactOne(ctx, geminiKey, voiceExactVoice, voiceExactStyle, text, outPath)
 		if err != nil {
 			return fmt.Errorf("line %d (%q): %w", i+1, truncateVoicePreview(text, 40), err)
 		}
-		manifest.Entries = append(manifest.Entries, api.VoiceExactManifestEntry{
-			Index: i + 1,
-			Text:  text,
-			File:  name,
-			Bytes: bytesWritten,
+		manifest.Entries = append(manifest.Entries, voiceExactManifestEntry{
+			Index: i + 1, Text: text, File: name, Bytes: bytesWritten,
 		})
 		fmt.Printf("  [%d/%d] %s (%d bytes)\n", i+1, len(batch.Texts), name, bytesWritten)
 		if i < len(batch.Texts)-1 {
@@ -326,31 +564,34 @@ func runVoiceExactBatch(ctx *auth.Context, agentID, textsFile, outDir string) er
 	manifestPath := filepath.Join(outDir, "manifest.json")
 	f, err := os.Create(manifestPath)
 	if err != nil {
-		return fmt.Errorf("failed to write manifest: %w", err)
+		return fmt.Errorf("write manifest: %w", err)
 	}
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(manifest); err != nil {
-		return fmt.Errorf("failed to encode manifest: %w", err)
+		return fmt.Errorf("encode manifest: %w", err)
 	}
 	fmt.Printf("Wrote %d clips + %s\n", len(manifest.Entries), manifestPath)
 	return nil
 }
 
-func runVoiceMulti(_ *cobra.Command, args []string) error {
-	ctx, err := auth.GetAuthContext()
-	if err != nil {
-		return err
-	}
-	agentID, err := ctx.RequireAgentID()
-	if err != nil {
-		return err
-	}
+// ---------- voice multi (podcast) ----------
 
+func runVoiceMulti(_ *cobra.Command, args []string) error {
 	narrative := args[0]
 	if len(strings.TrimSpace(narrative)) < 100 {
 		return fmt.Errorf("narrative must be at least 100 chars for a podcast")
+	}
+
+	ctx := context.Background()
+	authCtx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+	agentID, err := authCtx.RequireAgentID()
+	if err != nil {
+		return err
 	}
 
 	slug := voiceMultiSlug
@@ -360,47 +601,123 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 	if err := validateSlug(slug); err != nil {
 		return err
 	}
-
 	outputPath := voiceMultiOutput
 	if outputPath == "" {
-		outputPath = filepath.Join("/workspace", "documents", "podcasts", slug+".wav")
+		outputPath = filepath.Join(voiceDefaultPodDir, slug+".wav")
 	}
 
-	reqBody := api.VoicePodcastRequest{
-		AgentID:                agentID,
-		Slug:                   slug,
-		Narrative:              narrative,
-		NarratorVoiceOverride:  voiceMultiNarratorVoice,
-		NarratorStyleOverride:  voiceMultiNarratorStyle,
-		NarratorNameOverride:   voiceMultiNarratorName,
-		CompanionVoiceOverride: voiceMultiCompanionVoice,
-		CompanionStyleOverride: voiceMultiCompanionStyle,
-		CompanionNameOverride:  voiceMultiCompanionName,
-		TargetLength:           voiceMultiTargetLength,
-	}
-	resp, body, err := postVoiceAudio(ctx, "/api/cli/voice/podcast", reqBody, 310*time.Second)
+	// Resolve narrator + companion. CLI flag overrides beat STYLE.md.
+	sound := loadAgentSound()
+	narrator, err := resolvePodcastSpeaker(
+		"narrator", voiceMultiNarratorVoice, voiceMultiNarratorStyle, voiceMultiNarratorName,
+		sound.Narrator, "Host",
+	)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	if err := writeAudioResponse(resp, body, outputPath); err != nil {
-		return fmt.Errorf("voice multi failed: %w", err)
+	companion, err := resolvePodcastSpeaker(
+		"companion", voiceMultiCompanionVoice, voiceMultiCompanionStyle, voiceMultiCompanionName,
+		sound.Companion, "Guest",
+	)
+	if err != nil {
+		return err
+	}
+	if narrator.VoiceID == companion.VoiceID {
+		return fmt.Errorf("narrator and companion must use different voices (both set to %q)", narrator.VoiceID)
 	}
 
-	// Write the sidecar .meta.json from X-Kindship-* response headers.
-	// The sidecar is required — a failure here is a failure of the whole
-	// command, not a warning. (Per review: the contract promises both files.)
-	title, _ := url.QueryUnescape(resp.Header.Get("X-Kindship-Podcast-Title"))
-	coldOpen, _ := url.QueryUnescape(resp.Header.Get("X-Kindship-Cold-Open-Note"))
-	lineCountHeader := resp.Header.Get("X-Kindship-Line-Count")
+	targetLength := voiceMultiTargetLength
+	if targetLength == "" {
+		targetLength = voiceDefaultPodcastLength
+	}
+
+	secrets, err := fetchVoiceSecrets(authCtx, agentID, true)
+	if err != nil {
+		return err
+	}
+
+	// Pass 1 — ideate
+	ideateSystem, err := prompts.LoadAndRender(voiceSkillPod, voicePromptPodIdeateS, map[string]string{
+		"target_length":     targetLength,
+		"speaker_1_profile": voice.RenderSpeakerProfile(narrator),
+		"speaker_2_profile": voice.RenderSpeakerProfile(companion),
+	})
+	if err != nil {
+		return err
+	}
+	ideateUser, err := prompts.LoadAndRender(voiceSkillPod, voicePromptPodIdeateU, map[string]string{
+		"narrative": narrative,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "→ ideate (Opus 4.6 + 16k thinking)…")
+	ideateResp, err := callOpus(ctx, secrets, ideateSystem, ideateUser)
+	if err != nil {
+		return fmt.Errorf("ideate: %w", err)
+	}
+	preScript := ideateResp.TextOutput()
+	if preScript == "" {
+		return fmt.Errorf("ideate returned empty text (stop_reason=%q)", ideateResp.StopReason)
+	}
+
+	// Pass 2 — author
+	authorSystem, err := prompts.LoadAndRender(voiceSkillPod, voicePromptPodAuthorS, map[string]string{
+		"target_length":     targetLength,
+		"speaker_1_profile": voice.RenderSpeakerProfile(narrator),
+		"speaker_2_profile": voice.RenderSpeakerProfile(companion),
+		"pre_script_json":   preScript,
+	})
+	if err != nil {
+		return err
+	}
+	authorUser, err := prompts.LoadAndRender(voiceSkillPod, voicePromptPodAuthorU, map[string]string{
+		"narrative": narrative,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "→ author (Opus 4.6 + 16k thinking)…")
+	authorResp, err := callOpus(ctx, secrets, authorSystem, authorUser)
+	if err != nil {
+		return fmt.Errorf("author: %w", err)
+	}
+	script, err := voice.ParsePodcastScript(authorResp.TextOutput())
+	if err != nil {
+		return err
+	}
+
+	// Validate that every line's speaker matches one of our two.
+	for _, line := range script.Dialogue {
+		if line.Speaker != narrator.Name && line.Speaker != companion.Name {
+			return fmt.Errorf(
+				"author pass emitted unknown speaker %q (expected %q or %q)",
+				line.Speaker, narrator.Name, companion.Name,
+			)
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "→ render (Gemini TTS multi-speaker)…")
+	geminiPrompt := voice.RenderPodcastGeminiPrompt(script, narrator, companion)
+	pcm, err := llm.MultiSpeakerTTS(ctx, secrets.GeminiKey, geminiPrompt, []llm.Speaker{
+		{Speaker: narrator.Name, VoiceName: narrator.VoiceID},
+		{Speaker: companion.Name, VoiceName: companion.VoiceID},
+	})
+	if err != nil {
+		return fmt.Errorf("gemini multi-speaker: %w", err)
+	}
+	if err := writeWav(outputPath, pcm); err != nil {
+		return err
+	}
+
+	// Sidecar .meta.json with podcast-specific metadata.
+	metaPath := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".meta.json"
 	meta := map[string]any{
 		"slug":           slug,
-		"title":          title,
-		"cold_open_note": coldOpen,
-		"line_count":     lineCountHeader,
+		"title":          script.Title,
+		"cold_open_note": script.ColdOpenNote,
+		"line_count":     len(script.Dialogue),
 	}
-	metaPath := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".meta.json"
 	if err := writeMetaSidecar(metaPath, meta); err != nil {
 		return fmt.Errorf("podcast WAV written but sidecar failed: %w", err)
 	}
@@ -409,113 +726,60 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// resolvePodcastSpeaker merges CLI flag overrides with the STYLE.md
+// entry and returns a fully populated SpeakerProfile, or an actionable
+// error if key fields are missing.
+func resolvePodcastSpeaker(
+	role, flagVoice, flagStyle, flagName string,
+	styleEntry *voice.StyleVoice,
+	defaultName string,
+) (voice.SpeakerProfile, error) {
+	voiceID := flagVoice
+	clause := flagStyle
+	name := flagName
+	personality := ""
+	if styleEntry != nil {
+		if voiceID == "" {
+			voiceID = styleEntry.Voice
+		}
+		if clause == "" {
+			clause = styleEntry.BehavioralClause
+		}
+		personality = styleEntry.Personality
+	}
+	if voiceID == "" || clause == "" {
+		return voice.SpeakerProfile{}, fmt.Errorf(
+			"%s voice + behavioral clause required — either fill STYLE.md Sound section or pass --%s-voice / --%s-style",
+			role, role, role,
+		)
+	}
+	if !voice.IsValidGeminiVoice(voiceID) {
+		return voice.SpeakerProfile{}, fmt.Errorf("%s voice %q is not in the Gemini roster", role, voiceID)
+	}
+	if name == "" {
+		name = defaultName
+	}
+	return voice.SpeakerProfile{
+		Name:             name,
+		Role:             role,
+		VoiceID:          voiceID,
+		BehavioralClause: clause,
+		Personality:      personality,
+	}, nil
+}
+
 func writeMetaSidecar(path string, meta map[string]any) error {
 	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("failed to create sidecar file: %w", err)
+		return fmt.Errorf("create sidecar: %w", err)
 	}
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(meta); err != nil {
-		return fmt.Errorf("failed to encode sidecar JSON: %w", err)
+		return fmt.Errorf("encode sidecar: %w", err)
 	}
 	return nil
-}
-
-// postVoiceAudio is the shared HTTP POST for all three voice subcommands.
-// Returns the Response + pre-read error body (on non-2xx / non-audio) so
-// the caller can route success vs. failure. On success the body is NOT
-// read — caller streams it to disk.
-func postVoiceAudio(
-	ctx *auth.Context,
-	path string,
-	body any,
-	timeout time.Duration,
-) (*http.Response, []byte, error) {
-	reqJSON, err := json.Marshal(body)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode request: %w", err)
-	}
-	endpoint := ctx.APIBaseURL + path
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(reqJSON))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	ctx.SetAuthHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Kindship-CLI-Version", Version)
-
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to call %s: %w", path, err)
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if resp.StatusCode == http.StatusOK && startsWith(contentType, "audio/") {
-		return resp, nil, nil // success; caller streams body
-	}
-
-	errBody, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		return resp, nil, fmt.Errorf("failed to read error response: %w", readErr)
-	}
-	// Reopen a no-op body so defer resp.Body.Close() in the caller is safe.
-	resp.Body = io.NopCloser(bytes.NewReader(nil))
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		retryAfter := resp.Header.Get("Retry-After")
-		if retryAfter == "" {
-			retryAfter = "60"
-		}
-		var errResp api.VoiceErrorResponse
-		_ = json.Unmarshal(errBody, &errResp)
-		msg := errResp.Error
-		if msg == "" {
-			msg = "rate limit"
-		}
-		return resp, errBody, fmt.Errorf("rate-limited (%s): retry after %s seconds", msg, retryAfter)
-	}
-
-	if err := handleNonJSONResponse(resp.StatusCode, errBody); err != nil {
-		return resp, errBody, err
-	}
-	var errResp api.VoiceErrorResponse
-	if jsonErr := json.Unmarshal(errBody, &errResp); jsonErr != nil {
-		return resp, errBody, fmt.Errorf("failed (%d): %s", resp.StatusCode, string(errBody))
-	}
-	if errResp.Error != "" {
-		return resp, errBody, fmt.Errorf("failed (%d): %s", resp.StatusCode, errResp.Error)
-	}
-	return resp, errBody, fmt.Errorf("failed (%d)", resp.StatusCode)
-}
-
-func writeAudioResponse(resp *http.Response, _ []byte, outputPath string) error {
-	_, err := writeAudioResponseReturningBytes(resp, nil, outputPath)
-	return err
-}
-
-func writeAudioResponseReturningBytes(
-	resp *http.Response,
-	_ []byte,
-	outputPath string,
-) (int64, error) {
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		return 0, fmt.Errorf("failed to create output dir: %w", err)
-	}
-	out, err := os.Create(outputPath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer out.Close()
-
-	n, err := io.Copy(out, resp.Body)
-	if err != nil {
-		return 0, fmt.Errorf("failed to write audio: %w", err)
-	}
-	return n, nil
 }
 
 func truncateVoicePreview(s string, n int) string {

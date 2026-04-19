@@ -1,6 +1,6 @@
 module github.com/kindship-ai/kindship-cli
 
-go 1.22
+go 1.23
 
 require (
 	github.com/spf13/cobra v1.8.1
@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/coder/websocket v1.8.14 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
