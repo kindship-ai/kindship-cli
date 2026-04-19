@@ -484,7 +484,16 @@ const serveUrl = await bundle({
 for (let i = 0; i < cfg.frames.length; i++) {
   const f = cfg.frames[i];
   log('  [' + (i + 1) + '/' + cfg.frames.length + '] ' + f.label + ' frame=' + f.frame);
-  const browser = await openBrowser('chrome', {logLevel: 'error'});
+  // single-process Chromium: runs renderer + GPU + browser in ONE
+  // process with ONE thread pool. Without this, each openBrowser
+  // spawns 30-50 threads; cycling per-frame on a container with a
+  // low ulimit/pid cap trips 'pthread_create: Resource temporarily
+  // unavailable' after ~4-5 cycles. single-process mode drops that
+  // to ~5 threads per instance.
+  const browser = await openBrowser('chrome', {
+    logLevel: 'error',
+    chromiumOptions: {enableMultiProcessOnLinux: false},
+  });
   try {
     const composition = await selectComposition({
       serveUrl,
