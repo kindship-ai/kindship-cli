@@ -32,37 +32,31 @@ var (
 	videoReviewFramesKeep    bool
 )
 
-const defaultFramesPerScene = 1
-const defaultEvenFrameCount = 6
+const defaultFramesPerScene = 4
+const defaultEvenFrameCount = 8
 
-// maxAutoFrames caps the total number of frames auto-selected via
-// scenes.json / scene-extraction / evenly-spaced fallback. Empirically,
-// Akasha-sized containers can reliably spawn a fresh Chromium ≈7 times
-// in a row before fd/zombie-process accumulation prevents the 8th
-// openBrowser (observed across v0.1.67–0.1.69). 6 leaves a safety
-// margin. Agents needing denser sampling pass --frames explicitly,
-// which bypasses this cap (and accepts the responsibility for fit).
-const maxAutoFrames = 6
+// maxAutoFrames is a sanity ceiling for auto-selected frames so a
+// scenes.json with 200 scenes doesn't accidentally render 800 frames.
+// Earlier (v0.1.70-v0.1.72) this was set to 6 as a defensive measure
+// against what looked like a Chromium-cycling thread cap — but the
+// real cause was a project-level webpack misconfiguration (Tailwind
+// v4 hook in remotion.config.ts) bloating the bundle. With sane
+// project configs the per-frame Chrome cycle handles 24+ frames fine.
+const maxAutoFrames = 32
 
 // sceneFrameOffsets defines where within each scene's duration we sample
-// frames. Pure interior — never within 40% of either scene boundary —
+// frames. Pure interior — never within 20% of either scene boundary —
 // to avoid landing on in-fades, out-fades, or cross-fade blanks between
-// scenes. ONE pick per scene at the midpoint (0.5) so totals stay
-// under the container's observed ≈7-cycle Chromium ceiling.
-//
-// (Earlier revs sampled 2-4 frames per scene; both overshot container
-// budget on Akasha-sized agents. Agents needing denser sampling pass
-// --frames explicitly.)
-var sceneFrameOffsets = []float64{0.5}
+// scenes. 4 picks per scene at 20%/40%/60%/80% — enough to catch most
+// within-scene layout issues while keeping totals reasonable.
+var sceneFrameOffsets = []float64{0.2, 0.4, 0.6, 0.8}
 
 // renderScale shrinks each rendered still to this fraction of the
-// composition's native resolution. 0.33 → 1080p source becomes 360p,
-// cutting Chrome frame buffer + JPEG bytes ≈90%. Layout/spacing/
-// hierarchy critique at 360p stays accurate for major issues; only
-// fine typography detail loses fidelity (acceptable trade for
-// container survival — ECONNRESET on a dying Chromium is the
-// failure mode 0.5 was still hitting).
-const renderScale = 0.33
+// composition's native resolution. 0.5 → 1080p source becomes 540p,
+// cutting Chrome frame buffer + JPEG bytes ≈75%. Layout/spacing/
+// hierarchy critique at 540p stays accurate; only the finest
+// typography detail loses fidelity (acceptable for layout audit).
+const renderScale = 0.5
 
 var videoReviewFramesCmd = &cobra.Command{
 	Use:   "review-frames <slug>",
@@ -526,10 +520,32 @@ const cfg = JSON.parse(process.argv[2]);
 const log = (msg) => { if (!cfg.quiet) process.stderr.write(msg + '\n'); };
 
 log('bundling renderer (one-time)…');
-const serveUrl = await bundle({
-  entryPoint: path.resolve(cfg.entry),
-  onProgress: () => {},
-});
+let serveUrl;
+try {
+  serveUrl = await bundle({
+    entryPoint: path.resolve(cfg.entry),
+    onProgress: () => {},
+  });
+} catch (err) {
+  // bundle() runs webpack in-process — if remotion.config.ts has
+  // heavy webpackOverride entries (e.g. an unused Tailwind v4 plugin)
+  // the agent container's RAM gets exhausted and the process is OOM-
+  // killed before bundling finishes. Catch that explicitly and tell
+  // the agent where to look — the original error is opaque.
+  const msg = String(err && err.message || err);
+  if (/killed|SIGKILL|out of memory|ENOMEM|exit code 137/i.test(msg)) {
+    process.stderr.write(
+      'Bundle was killed — likely OOM during webpack compilation.\n' +
+      'Common cause: unused webpackOverride entries in remotion.config.ts\n' +
+      '(e.g. a Tailwind v4 plugin left over from scaffold). Open\n' +
+      'remotion.config.ts and remove any webpackOverride that the\n' +
+      'composition does not strictly need, then retry.\n\n' +
+      'Original error: ' + msg + '\n'
+    );
+    process.exit(2);
+  }
+  throw err;
+}
 
 // Per-frame browser cycle — peak memory is O(1) in cfg.frames.length
 // because Chromium state resets between renders. 'composition' also
