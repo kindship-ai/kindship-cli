@@ -141,3 +141,18 @@ type VideoReviewResponse struct {
 	Review      string  `json:"review"`
 	Error       string  `json:"error,omitempty"`
 }
+
+// VideoReviewFramesResponse is the response from POST
+// /api/cli/videos/[slug]/review-frames. Same timing-field shape as the
+// MP4 review path so output formatting can stay symmetric.
+type VideoReviewFramesResponse struct {
+	Slug           string `json:"slug"`
+	Model          string `json:"model"`
+	FramesUploaded int    `json:"frames_uploaded"`
+	TotalBytes     int64  `json:"total_bytes"`
+	UploadMS       int64  `json:"upload_ms"`
+	GenerateMS     int64  `json:"generate_ms"`
+	TotalMS        int64  `json:"total_ms"`
+	Review         string `json:"review"`
+	Error          string `json:"error,omitempty"`
+}
