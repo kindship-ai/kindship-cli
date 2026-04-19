@@ -372,13 +372,16 @@ func frameToTimestamp(frame, fps int) string {
 // is fast (~1-3s) so wall time stays reasonable for ≤40 frames.
 func renderStills(dir, compositionID string, picks []framePick, framesDir string) error {
 	for i, p := range picks {
-		// Filename uses the index so sort order matches the picks slice
-		// ordering; timestamp lives in the label we ship to Gemini.
-		out := filepath.Join(framesDir, fmt.Sprintf("%03d.png", i))
+		// JPEG (not PNG) so 8-40 frames at 1080p fit in Vercel's 4.5MB
+		// function body limit. Quality=85 keeps layout/text crisp enough
+		// for Gemini's frame-level critique while landing each frame at
+		// ~200-500KB. Filename uses the index so sort order matches the
+		// picks slice; timestamp lives in the label we ship to Gemini.
+		out := filepath.Join(framesDir, fmt.Sprintf("%03d.jpg", i))
 		// `npx remotion still` signature is positional: entry, composition,
 		// output. --frame is a flag. The composition can't be passed via
 		// --composition (that flag doesn't exist on `still`); putting the
-		// PNG path before the composition id makes Remotion try to load
+		// output path before the composition id makes Remotion try to load
 		// it as the composition and errors out.
 		args := []string{
 			"remotion",
@@ -387,6 +390,8 @@ func renderStills(dir, compositionID string, picks []framePick, framesDir string
 			compositionID,
 			out,
 			fmt.Sprintf("--frame=%d", p.frame),
+			"--image-format=jpeg",
+			"--jpeg-quality=85",
 		}
 		cmd := exec.Command("npx", args...)
 		cmd.Dir = dir
