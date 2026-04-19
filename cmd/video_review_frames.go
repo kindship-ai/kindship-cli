@@ -47,11 +47,13 @@ const defaultEvenFrameCount = 6
 var sceneFrameOffsets = []float64{0.3, 0.7}
 
 // renderScale shrinks each rendered still to this fraction of the
-// composition's native resolution. 0.5 → 1080p source becomes 540p,
-// cutting Chrome frame buffer + JPEG bytes ≈75%. Layout/spacing/
-// hierarchy critique at 540p stays accurate; only fine typography
-// detail loses fidelity (acceptable trade for container survival).
-const renderScale = 0.5
+// composition's native resolution. 0.33 → 1080p source becomes 360p,
+// cutting Chrome frame buffer + JPEG bytes ≈90%. Layout/spacing/
+// hierarchy critique at 360p stays accurate for major issues; only
+// fine typography detail loses fidelity (acceptable trade for
+// container survival — ECONNRESET on a dying Chromium is the
+// failure mode 0.5 was still hitting).
+const renderScale = 0.33
 
 var videoReviewFramesCmd = &cobra.Command{
 	Use:   "review-frames <slug>",
@@ -512,6 +514,13 @@ for (let i = 0; i < cfg.frames.length; i++) {
     });
   } finally {
     await browser.close().catch(() => {});
+  }
+  // Brief pause between cycles so the kernel can fully reap Chromium's
+  // process tree (zombies, child processes, file descriptors) before
+  // openBrowser fires again. Without this, the next cycle can race
+  // against still-dying state from the previous one.
+  if (i < cfg.frames.length - 1) {
+    await new Promise((r) => setTimeout(r, 2000));
   }
 }
 `
