@@ -26,9 +26,12 @@ var videoCmd = &cobra.Command{
 	Long: `Commands for publishing Remotion-based videos.
 
 Subcommands:
-  publish  Upload a built Remotion composition
-  list     List your videos (not yet implemented)
-  delete   Delete a video (not yet implemented)
+  publish   Upload a built Remotion composition
+  list      List your videos
+  status    Show per-video deep dive (revision, deploy, render state)
+  render    Upload renderer site + invoke Lambda + save MP4 locally
+  download  Fetch a previously-rendered MP4 from the cache
+  delete    Delete a video (not yet implemented)
 
 See the kindship-video skill (~/.claude/skills/kindship-video/SKILL.md) for
 the full workflow. TL;DR:
@@ -89,10 +92,18 @@ Examples:
 
 var videoListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List your videos (coming soon)",
-	RunE: func(_ *cobra.Command, _ []string) error {
-		return fmt.Errorf("video list is not yet implemented; check the Videos tab in the web app")
-	},
+	Short: "List your videos",
+	Long: `List the videos owned by the current agent.
+
+Each row reflects the latest revision: whether the renderer site has
+been deployed to S3 ('site') and whether an MP4 is cached and ready
+to download ('mp4'). Use 'kindship video render <slug>' to populate
+either, 'kindship video download <slug>' to grab a cached MP4.
+
+Examples:
+  kindship video list
+  kindship video list --format json`,
+	RunE: runVideoList,
 }
 
 var videoDeleteCmd = &cobra.Command{
@@ -427,6 +438,79 @@ func createVideoArchive(compositionMjs, compositionsFile, publicDir string) (*by
 	}
 
 	return &buf, fileCount, nil
+}
+
+// runVideoList calls GET /api/cli/videos/list and renders a tabular
+// summary. The server returns one entry per video already filtered to
+// rows with a current_revision_id, so the CLI doesn't need to second-
+// guess which rows to show.
+func runVideoList(_ *cobra.Command, _ []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("%s/api/cli/videos/list?agent_id=%s", ctx.APIBaseURL, agentID)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to list videos: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to list videos: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp api.VideoListResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("failed to list videos: %s", errResp.Error)
+		}
+		return fmt.Errorf("failed to list videos (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var listResp api.VideoListResponse
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if videoFormat == "json" {
+		return printJSON(listResp)
+	}
+
+	if len(listResp.Videos) == 0 {
+		fmt.Println("No videos found. Publish one with 'kindship video publish <slug> --title \"...\"'.")
+		return nil
+	}
+
+	fmt.Printf("%-32s %-8s %-10s %s\n", "SLUG", "SITE", "MP4", "UPDATED")
+	for _, v := range listResp.Videos {
+		site := "no"
+		if v.HasMP4Render {
+			site = "yes"
+		}
+		fmt.Printf("%-32s %-8s %-10s %s\n", v.Slug, site, v.MP4Status, formatRelativeTime(v.UpdatedAt))
+	}
+	return nil
 }
 
 func writeTarEntry(tw *tar.Writer, archivePath string, info os.FileInfo, sourcePath string) error {
