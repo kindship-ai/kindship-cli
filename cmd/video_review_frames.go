@@ -422,51 +422,144 @@ func frameToTimestamp(frame, fps int) string {
 	return fmt.Sprintf("%02d:%02d.%03d", mm, ss, ms)
 }
 
-// renderStills shells out to `npx remotion still` once per pick.
-// Sequential to avoid overloading the agent's container; each render
-// is fast (~1-3s) so wall time stays reasonable for ≤40 frames.
+// stillRenderArg is the per-frame entry in the JSON arg passed to the
+// inline Node script. Field names use the JSON casing the script reads.
+type stillRenderArg struct {
+	Frame  int    `json:"frame"`
+	Output string `json:"output"`
+	Label  string `json:"label"`
+}
+
+// stillRenderArgs is the full JSON arg shipped to the inline render
+// script. Bundled into a single argv string instead of stdin so the
+// Node script stays simple.
+type stillRenderArgs struct {
+	Entry         string           `json:"entry"`
+	CompositionID string           `json:"compositionId"`
+	Frames        []stillRenderArg `json:"frames"`
+	Quality       int              `json:"quality"`
+	Quiet         bool             `json:"quiet"`
+}
+
+// stillRendererScript is the inline Node ESM script that bundles ONCE,
+// opens ONE Chromium, and renders N stills against it. Massively
+// reduces peak memory vs spawning `npx remotion still` per frame:
+//
+//   - 1 esbuild bundle (≈50 MB transient) instead of N (≈50 MB each)
+//   - 1 Chromium (≈150 MB persistent) instead of N (≈150 MB each)
+//   - 1 Node heap (≈30 MB) instead of N
+//
+// For 24 frames that's ≈5 GB of peak memory NOT allocated, which keeps
+// the agent container alive instead of OOM-killed mid-review.
+//
+// Reads its config from process.argv[2] as JSON. Writes nothing to
+// stdout unless cfg.quiet=false. Exits non-zero on first render error.
+const stillRendererScript = `import {bundle} from '@remotion/bundler';
+import {selectComposition, openBrowser, renderStill} from '@remotion/renderer';
+import path from 'node:path';
+
+const cfg = JSON.parse(process.argv[2]);
+const log = (msg) => { if (!cfg.quiet) process.stderr.write(msg + '\n'); };
+
+log('bundling renderer (one-time)…');
+const serveUrl = await bundle({
+  entryPoint: path.resolve(cfg.entry),
+  onProgress: () => {},
+});
+
+log('opening browser (one-time)…');
+const browser = await openBrowser('chrome', {logLevel: 'error'});
+
+try {
+  log('selecting composition…');
+  const composition = await selectComposition({
+    serveUrl,
+    id: cfg.compositionId,
+    puppeteerInstance: browser,
+  });
+
+  for (let i = 0; i < cfg.frames.length; i++) {
+    const f = cfg.frames[i];
+    log('  [' + (i + 1) + '/' + cfg.frames.length + '] ' + f.label + ' frame=' + f.frame);
+    await renderStill({
+      composition,
+      serveUrl,
+      output: f.output,
+      frame: f.frame,
+      imageFormat: 'jpeg',
+      jpegQuality: cfg.quality,
+      puppeteerInstance: browser,
+    });
+  }
+} finally {
+  await browser.close().catch(() => {});
+}
+`
+
+// renderStills writes the inline @remotion/renderer-driven script to
+// the temp frames dir and runs it ONCE — bundling once, opening one
+// Chromium, rendering all picks against the shared instance. Caps node
+// heap at 768 MB so a runaway render fails fast instead of OOM-killing
+// the whole container (and the agent loop running alongside).
 func renderStills(dir, compositionID string, picks []framePick, framesDir string) error {
+	if len(picks) == 0 {
+		return fmt.Errorf("no frames to render")
+	}
+
+	args := stillRenderArgs{
+		Entry:         filepath.Join(dir, "src", "index.ts"),
+		CompositionID: compositionID,
+		Quality:       85,
+		Quiet:         videoReviewFramesFormat == "json",
+		Frames:        make([]stillRenderArg, len(picks)),
+	}
 	for i, p := range picks {
-		// JPEG (not PNG) so 8-40 frames at 1080p fit in Vercel's 4.5MB
-		// function body limit. Quality=85 keeps layout/text crisp enough
-		// for Gemini's frame-level critique while landing each frame at
-		// ~200-500KB. Filename uses the index so sort order matches the
-		// picks slice; timestamp lives in the label we ship to Gemini.
 		out := filepath.Join(framesDir, fmt.Sprintf("%03d.jpg", i))
-		// `npx remotion still` signature is positional: entry, composition,
-		// output. --frame is a flag. The composition can't be passed via
-		// --composition (that flag doesn't exist on `still`); putting the
-		// output path before the composition id makes Remotion try to load
-		// it as the composition and errors out.
-		args := []string{
-			"remotion",
-			"still",
-			"./src/index.ts",
-			compositionID,
-			out,
-			fmt.Sprintf("--frame=%d", p.frame),
-			"--image-format=jpeg",
-			"--jpeg-quality=85",
-		}
-		cmd := exec.Command("npx", args...)
-		cmd.Dir = dir
-		if videoReviewFramesFormat == "json" {
-			cmd.Stdout = io.Discard
-			cmd.Stderr = io.Discard
-		} else {
-			cmd.Stdout = io.Discard
-			cmd.Stderr = os.Stderr
-		}
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("npx remotion still failed for frame %d (%s): %w (run manually for full error)", p.frame, p.timestamp, err)
-		}
-		if _, err := os.Stat(out); err != nil {
-			return fmt.Errorf("expected output %s missing after `npx remotion still`: %w", out, err)
+		args.Frames[i] = stillRenderArg{
+			Frame:  p.frame,
+			Output: out,
+			Label:  p.timestamp,
 		}
 		picks[i].pngPath = out
-		if videoReviewFramesFormat != "json" {
-			fmt.Printf("  [%d/%d] %s frame=%d\n", i+1, len(picks), p.timestamp, p.frame)
+	}
+	argJSON, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("failed to marshal renderer args: %w", err)
+	}
+
+	scriptPath := filepath.Join(framesDir, "_render.mjs")
+	if err := os.WriteFile(scriptPath, []byte(stillRendererScript), 0o644); err != nil {
+		return fmt.Errorf("failed to write inline renderer script: %w", err)
+	}
+
+	cmd := exec.Command("node", scriptPath, string(argJSON))
+	cmd.Dir = dir
+	// Cap node heap so a runaway render trips a hard limit rather than
+	// dragging the whole container down with it. 768 MB is enough for
+	// a 1080p Remotion bundle + Chrome handshake; OOM here is a real
+	// signal the agent should fix the composition or shrink the batch.
+	cmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=768")
+	if videoReviewFramesFormat == "json" {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("batched still render failed: %w (script kept at %s for inspection — use --keep)", err, scriptPath)
+	}
+
+	for _, p := range picks {
+		if _, err := os.Stat(p.pngPath); err != nil {
+			return fmt.Errorf("expected output %s missing after batched render (frame %d, %s)", p.pngPath, p.frame, p.timestamp)
 		}
+	}
+
+	// Clean up the inline script unless --keep is set; framesDir itself
+	// is removed by the caller's defer when --keep is false.
+	if !videoReviewFramesKeep {
+		_ = os.Remove(scriptPath)
 	}
 	return nil
 }
