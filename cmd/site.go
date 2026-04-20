@@ -1736,7 +1736,10 @@ func createArchive(dir string) (*bytes.Buffer, int, error) {
 
 		fileCount++
 		if fileCount > maxFileCount {
-			return fmt.Errorf("too many files (max %d)", maxFileCount)
+			return fmt.Errorf(
+				"too many files (max %d). Use --only <glob> to ship a subset per call; the remote preserves files not listed. See `kindship site push --help`",
+				maxFileCount,
+			)
 		}
 
 		header, err := tar.FileInfoHeader(info, "")
@@ -1775,7 +1778,11 @@ func createArchive(dir string) (*bytes.Buffer, int, error) {
 	}
 
 	if buf.Len() > maxArchiveSize {
-		return nil, 0, fmt.Errorf("archive too large (%dMB, max %dMB)", buf.Len()/(1024*1024), maxArchiveSize/(1024*1024))
+		return nil, 0, fmt.Errorf(
+			"archive too large (%dMB, max %dMB). Use --only <glob> to ship a subset per call; the remote preserves files not listed. See `kindship site push --help`",
+			buf.Len()/(1024*1024),
+			maxArchiveSize/(1024*1024),
+		)
 	}
 
 	return &buf, fileCount, nil
