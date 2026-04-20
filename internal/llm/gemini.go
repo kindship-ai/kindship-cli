@@ -48,6 +48,18 @@ func liveModel() string {
 	return "models/gemini-3.1-flash-live-preview"
 }
 
+// geminiRESTBaseURL is the scheme+host for the Gemini REST API.
+// Overridable via KINDSHIP_GEMINI_REST_BASE_URL so unit tests can
+// point at an httptest.Server without monkeying with DNS or
+// http.RoundTripper. Production call sites never set it; CI + test
+// processes do via t.Setenv.
+func geminiRESTBaseURL() string {
+	if v := os.Getenv("KINDSHIP_GEMINI_REST_BASE_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "https://generativelanguage.googleapis.com"
+}
+
 // SingleSpeakerLive renders `text` with Gemini Live API, voiceName
 // speaking, and returns raw PCM bytes. `stylePrefix` is prepended to
 // the user turn — pass an empty string to render the text bare.
@@ -356,6 +368,151 @@ func MultiSpeakerTTS(
 		return nil, fmt.Errorf("gemini TTS returned no audio: %s", preview(string(respBody)))
 	}
 	return audio, nil
+}
+
+// UnderstandAudio is the generic Gemini audio-understanding primitive
+// that `kindship voice understanding` exposes to agents.
+//
+// Takes an audio file as raw bytes, a prompt describing what the
+// agent wants from the audio, and an optional JSON schema to coerce
+// the response into structured output. Returns the model's response
+// verbatim — plain text when schema is nil, a JSON document (as a
+// string) when schema is set.
+//
+// Why so thin: the CLI subcommand should be a generic primitive, not
+// a family of task-specific wrappers. The SKILL.md teaches agents
+// the sentence-alignment recipe but leaves them free to invent
+// other shapes (chapters, emotion arcs, speaker turns, plain
+// transcription, …). This function is the narrow waist.
+//
+// Inline audio has a ~15 MB base64-encoded request-body ceiling at
+// Gemini — covers ~3.5 min of 24 kHz mono WAV. Larger files should
+// use the Files API (separate follow-up; not implemented here to
+// keep the first cut small).
+//
+// The returned string is whatever Gemini put in
+// `candidates[0].content.parts[0].text`. When a schema is set the
+// model is instructed via responseMimeType=application/json +
+// responseSchema, so the returned text is guaranteed-parseable JSON
+// against the caller's schema.
+func UnderstandAudio(
+	ctx context.Context,
+	apiKey, model string,
+	audioBytes []byte, audioMime string,
+	prompt string,
+	responseSchema map[string]any,
+) (string, error) {
+	if apiKey == "" {
+		return "", fmt.Errorf("UnderstandAudio: apiKey is empty")
+	}
+	if model == "" {
+		return "", fmt.Errorf("UnderstandAudio: model is empty")
+	}
+	if len(audioBytes) == 0 {
+		return "", fmt.Errorf("UnderstandAudio: audioBytes is empty")
+	}
+	if audioMime == "" {
+		return "", fmt.Errorf("UnderstandAudio: audioMime is empty")
+	}
+	if prompt == "" {
+		return "", fmt.Errorf("UnderstandAudio: prompt is empty")
+	}
+
+	parts := []any{
+		map[string]any{"text": prompt},
+		map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": audioMime,
+				"data":     base64.StdEncoding.EncodeToString(audioBytes),
+			},
+		},
+	}
+	body := map[string]any{
+		"contents": []any{map[string]any{
+			"role":  "user",
+			"parts": parts,
+		}},
+	}
+	if responseSchema != nil {
+		body["generationConfig"] = map[string]any{
+			"responseMimeType": "application/json",
+			"responseSchema":   responseSchema,
+		}
+	}
+
+	endpoint := fmt.Sprintf(
+		"%s/v1beta/models/%s:generateContent?key=%s",
+		geminiRESTBaseURL(),
+		url.PathEscape(model),
+		url.QueryEscape(apiKey),
+	)
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, endpoint, bytes.NewReader(payload),
+	)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Generous timeout: sentence-level understanding on 3-min audio
+	// takes ~15-55s depending on model + load. 5 minutes handles
+	// pathological cases without leaving the CLI hung indefinitely.
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST generateContent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		p := string(respBody)
+		if len(p) > 400 {
+			p = p[:400]
+		}
+		return "", fmt.Errorf("gemini %d: %s", resp.StatusCode, p)
+	}
+
+	var parsed struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("parse response: %w: %s", err, preview(string(respBody)))
+	}
+
+	// Return candidates[0].content.parts[0].text verbatim — the
+	// thin-wrapper contract. Gemini's generateContent returns exactly
+	// one candidate with one text part for structured output; if it
+	// ever emits more than one, concatenating them would silently
+	// invalidate a structured-output JSON payload, so we take the
+	// first and surface a clear error if the response shape
+	// diverged.
+	if len(parsed.Candidates) == 0 {
+		return "", fmt.Errorf(
+			"gemini returned no candidates: %s", preview(string(respBody)),
+		)
+	}
+	cand := parsed.Candidates[0]
+	if len(cand.Content.Parts) == 0 || cand.Content.Parts[0].Text == "" {
+		return "", fmt.Errorf(
+			"gemini candidate has no text part: %s", preview(string(respBody)),
+		)
+	}
+	return cand.Content.Parts[0].Text, nil
 }
 
 // PCMToWAV wraps 16-bit mono PCM at the Gemini native 24kHz in a

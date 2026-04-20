@@ -87,6 +87,15 @@ var (
 	voiceMultiCompanionName  string
 	voiceMultiTargetLength   string
 	voiceMultiOutput         string
+
+	voiceUnderstandPrompt     string
+	voiceUnderstandPromptFile string
+	voiceUnderstandSchema     string
+	voiceUnderstandSchemaFile string
+	voiceUnderstandModel      string
+	voiceUnderstandOutput     string
+
+	voiceNoTranscript bool
 )
 
 var voiceCmd = &cobra.Command{
@@ -137,6 +146,33 @@ Batch mode paces requests 7 seconds apart.`,
 	RunE: runVoiceExact,
 }
 
+var voiceUnderstandCmd = &cobra.Command{
+	Use:   "understanding <audio-path>",
+	Short: "Send audio to Gemini with a caller-supplied prompt and (optional) JSON schema",
+	Long: `Generic audio-understanding primitive. You supply the prompt and
+(optionally) a JSON schema; the CLI returns what the model said —
+raw, unwrapped, unnormalized.
+
+The same primitive serves sentence-level alignment, plain
+transcription, speaker classification, emotion arcs, chapter
+extraction — anything Gemini will do to audio. See the
+` + "`kindship-voice`" + ` skill for the sentence-alignment recipe you'll
+reach for most of the time.
+
+Examples:
+  # sentence-level alignment
+  kindship voice understanding narration/foo.wav \
+    --output narration/foo.aligned.json \
+    --prompt "Transcribe with sentence-level timestamps as JSON matching the schema." \
+    --schema '{"type":"object",…}'
+
+  # plain transcription to stdout
+  kindship voice understanding clip.wav \
+    --prompt "Transcribe this audio verbatim."`,
+	Args: cobra.ExactArgs(1),
+	RunE: runVoiceUnderstand,
+}
+
 var voiceMultiCmd = &cobra.Command{
 	Use:   "multi <narrative>",
 	Short: "Generate a two-speaker podcast from a narrative",
@@ -161,6 +197,8 @@ func init() {
 	voiceCmd.Flags().IntVar(&voiceTargetMinutes, "target-minutes", 0, "finished audio target length (default server-chosen, ~3)")
 	voiceCmd.Flags().StringVar(&voiceOutput, "output", "", "destination path (default ./narration/<slug>.wav relative to cwd — run from inside a video dir)")
 	voiceCmd.Flags().StringVar(&voiceFormat, "format", "text", "success summary format: text (default) or json")
+	voiceCmd.Flags().BoolVar(&voiceNoTranscript, "no-transcript", false,
+		"skip writing the <slug>.transcript.txt sidecar next to the WAV")
 
 	voiceExactCmd.Flags().StringVar(&voiceExactVoice, "voice", "", "Gemini voice ID (required)")
 	voiceExactCmd.Flags().StringVar(&voiceExactStyle, "style", "", "behavioral clause (required)")
@@ -181,8 +219,22 @@ func init() {
 	voiceMultiCmd.Flags().StringVar(&voiceMultiTargetLength, "target-length", "", "target episode length e.g. \"6-8 minutes\" (default \"5-7 minutes\")")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiOutput, "output", "", "destination path (default /workspace/documents/podcasts/<slug>.wav)")
 
+	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandPrompt, "prompt", "",
+		"inline prompt for Gemini; mutually exclusive with --prompt-file")
+	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandPromptFile, "prompt-file", "",
+		"read the prompt from this file")
+	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandSchema, "schema", "",
+		"JSON schema for structured output; forces responseMimeType=application/json")
+	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandSchemaFile, "schema-file", "",
+		"read the JSON schema from this file")
+	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandModel, "model", "gemini-2.5-flash",
+		"Gemini model id (gemini-2.5-flash default; gemini-2.5-pro for paragraphs / longer context)")
+	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandOutput, "output", "",
+		"output path (default: stdout). Use e.g. narration/<slug>.aligned.json to land a sidecar next to the WAV.")
+
 	voiceCmd.AddCommand(voiceExactCmd)
 	voiceCmd.AddCommand(voiceMultiCmd)
+	voiceCmd.AddCommand(voiceUnderstandCmd)
 	rootCmd.AddCommand(voiceCmd)
 }
 
@@ -442,16 +494,57 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Transcript sidecar — the joined beat text (what Opus authored,
+	// not what Gemini actually spoke, which can differ subtly). Useful
+	// metadata for agents who want to captions/compare/re-align. Opt
+	// out with --no-transcript on rare cases where the .txt file
+	// isn't wanted next to the WAV.
+	transcriptPath := ""
+	if !voiceNoTranscript {
+		transcriptPath = transcriptSidecarPath(outputPath)
+		parts := make([]string, 0, len(script.Beats))
+		for _, b := range script.Beats {
+			if b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		transcript := strings.Join(parts, "\n\n")
+		if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+			return fmt.Errorf("write transcript sidecar: %w", err)
+		}
+	}
+
 	if voiceFormat == "json" {
-		return printJSON(map[string]any{
+		out := map[string]any{
 			"slug":  slug,
 			"path":  outputPath,
 			"title": script.Title,
 			"beats": len(script.Beats),
-		})
+		}
+		if transcriptPath != "" {
+			out["transcript_path"] = transcriptPath
+		}
+		return printJSON(out)
 	}
-	fmt.Printf("Generated %s → %s (%d beats)\n", slug, outputPath, len(script.Beats))
+	tail := ""
+	if transcriptPath != "" {
+		tail = fmt.Sprintf(" (+ %s)", filepath.Base(transcriptPath))
+	}
+	fmt.Printf("Generated %s → %s (%d beats)%s\n", slug, outputPath, len(script.Beats), tail)
 	return nil
+}
+
+// transcriptSidecarPath returns the conventional <audio-stem>.transcript.txt
+// path alongside the WAV. kindship voice understanding pairs with this
+// artifact — agents who want sentence-level timings after rendering
+// pass --text-file narration/<slug>.transcript.txt into the
+// understanding subcommand via a --prompt-file if desired. We keep
+// the transcript in a distinct file so other downstream tools
+// (caption generators, re-alignment, diffing against Gemini's own
+// transcription) can read it without parsing metadata.
+func transcriptSidecarPath(audioPath string) string {
+	ext := filepath.Ext(audioPath)
+	return strings.TrimSuffix(audioPath, ext) + ".transcript.txt"
 }
 
 // ---------- voice exact ----------
@@ -786,6 +879,177 @@ func resolvePodcastSpeaker(
 		BehavioralClause: clause,
 		Personality:      personality,
 	}, nil
+}
+
+// runVoiceUnderstand wires `kindship voice understanding <audio>` to
+// llm.UnderstandAudio. The subcommand is intentionally thin: the
+// prompt + optional schema are caller-supplied; the CLI doesn't
+// normalize or validate the response beyond "Gemini returned text".
+// That leaves the subcommand composable across sentence alignment,
+// transcription, chapter extraction, speaker turns, emotion arcs, or
+// anything else agents invent on top.
+//
+// Gemini's inline-audio request body caps at ~15 MB base64 (~11 MB
+// raw), roughly 3.5 min of 24 kHz mono WAV. Larger files need the
+// Files API — call site out of scope for v1, reject here with a
+// clear pointer.
+const voiceUnderstandMaxAudioBytes = 15 * 1024 * 1024
+
+func runVoiceUnderstand(_ *cobra.Command, args []string) error {
+	ctx := context.Background()
+	authCtx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+	agentID, err := authCtx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	// Exactly one of --prompt / --prompt-file.
+	hasInline := voiceUnderstandPrompt != ""
+	hasFile := voiceUnderstandPromptFile != ""
+	if hasInline == hasFile {
+		return fmt.Errorf("exactly one of --prompt or --prompt-file must be provided")
+	}
+	prompt := voiceUnderstandPrompt
+	if hasFile {
+		raw, err := os.ReadFile(voiceUnderstandPromptFile)
+		if err != nil {
+			return fmt.Errorf("read --prompt-file: %w", err)
+		}
+		prompt = strings.TrimSpace(string(raw))
+		if prompt == "" {
+			return fmt.Errorf("--prompt-file %s is empty", voiceUnderstandPromptFile)
+		}
+	}
+
+	// At most one of --schema / --schema-file; parse into a map or
+	// leave nil to skip structured output.
+	var schemaBytes []byte
+	if voiceUnderstandSchema != "" && voiceUnderstandSchemaFile != "" {
+		return fmt.Errorf("pass --schema OR --schema-file, not both")
+	}
+	if voiceUnderstandSchema != "" {
+		schemaBytes = []byte(voiceUnderstandSchema)
+	} else if voiceUnderstandSchemaFile != "" {
+		raw, err := os.ReadFile(voiceUnderstandSchemaFile)
+		if err != nil {
+			return fmt.Errorf("read --schema-file: %w", err)
+		}
+		schemaBytes = raw
+	}
+	var schema map[string]any
+	if schemaBytes != nil {
+		if err := json.Unmarshal(schemaBytes, &schema); err != nil {
+			return fmt.Errorf("parse --schema as JSON object: %w", err)
+		}
+	}
+
+	// Read audio + reject oversized payloads up front. The 15 MB
+	// ceiling is Gemini's, not ours.
+	audioPath := args[0]
+	audioBytes, err := os.ReadFile(audioPath)
+	if err != nil {
+		return fmt.Errorf("read audio file %s: %w", audioPath, err)
+	}
+	if len(audioBytes) > voiceUnderstandMaxAudioBytes {
+		return fmt.Errorf(
+			"audio file %s is %d bytes; Gemini inline audio caps at %d bytes (~3.5 min of 24kHz mono WAV). For longer files, use a shorter audio segment or wait for the Files-API follow-up",
+			audioPath, len(audioBytes), voiceUnderstandMaxAudioBytes,
+		)
+	}
+	audioMime, err := mimeForAudioExt(audioPath)
+	if err != nil {
+		return err
+	}
+
+	// Fetch the Gemini API key via the existing account-level
+	// secret helper — same flow as voice / voice exact / voice multi.
+	if authCtx.Method != auth.AuthMethodServiceKey {
+		return fmt.Errorf(
+			"kindship voice understanding must run inside an agent container (secrets endpoint is IP-whitelisted)",
+		)
+	}
+	apiClient := api.NewClient(authCtx.APIBaseURL, false)
+	secrets, err := apiClient.FetchSecrets(agentID, "gemini", authCtx.Token)
+	if err != nil {
+		return fmt.Errorf("fetch gemini secrets: %w", err)
+	}
+	apiKey := secrets["GEMINI_API_KEY"]
+	if apiKey == "" {
+		return fmt.Errorf("gemini secret missing GEMINI_API_KEY")
+	}
+
+	fmt.Fprintf(os.Stderr,
+		"→ generating audio understanding via %s (%d bytes audio, ~15-55s depending on model + prompt)…\n",
+		voiceUnderstandModel, len(audioBytes))
+
+	result, err := llm.UnderstandAudio(
+		ctx, apiKey, voiceUnderstandModel,
+		audioBytes, audioMime, prompt, schema,
+	)
+	if err != nil {
+		return fmt.Errorf("gemini understand: %w", err)
+	}
+
+	// Write to --output (atomic) or stdout.
+	if voiceUnderstandOutput == "" {
+		_, err := os.Stdout.Write([]byte(result))
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(voiceUnderstandOutput), 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	tmp := voiceUnderstandOutput + ".tmp"
+	// Atomic-write with cleanup on any failure path — matches the
+	// pattern in cmd/update.go. Without the defer, a partial write
+	// leaves <output>.tmp lying around next to the WAV and agents
+	// see stray files they didn't ask for.
+	writeOK := false
+	defer func() {
+		if !writeOK {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := os.WriteFile(tmp, []byte(result), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, voiceUnderstandOutput); err != nil {
+		return fmt.Errorf("rename %s → %s: %w", tmp, voiceUnderstandOutput, err)
+	}
+	writeOK = true
+	fmt.Fprintf(os.Stderr, "→ wrote %s (%d bytes)\n", voiceUnderstandOutput, len(result))
+	return nil
+}
+
+// mimeForAudioExt returns the MIME Gemini expects for the audio
+// formats it supports inline. Pulled from
+// https://ai.google.dev/gemini-api/docs/audio ("Supported audio
+// formats"): wav, mp3, aiff, aac, ogg vorbis, flac. Unknown
+// extensions reject locally with a clear list rather than being
+// sent as audio/wav and surfacing as a remote 400.
+func mimeForAudioExt(path string) (string, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".wav":
+		return "audio/wav", nil
+	case ".mp3":
+		return "audio/mp3", nil
+	case ".aiff", ".aif":
+		return "audio/aiff", nil
+	case ".aac":
+		return "audio/aac", nil
+	case ".ogg":
+		return "audio/ogg", nil
+	case ".flac":
+		return "audio/flac", nil
+	default:
+		return "", fmt.Errorf(
+			"unsupported audio extension %q (Gemini inline audio accepts: wav, mp3, aiff, aac, ogg, flac)",
+			ext,
+		)
+	}
 }
 
 func writeMetaSidecar(path string, meta map[string]any) error {
