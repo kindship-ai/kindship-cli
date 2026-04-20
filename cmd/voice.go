@@ -940,32 +940,104 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "→ render (Gemini TTS multi-speaker)…")
-	geminiPrompt := voice.RenderPodcastGeminiPrompt(script, narrator, companion)
-	pcm, err := llm.MultiSpeakerTTS(ctx, secrets.GeminiKey, geminiPrompt, []llm.Speaker{
+	// Chunked multi-speaker render. Gemini 3.1 Flash TTS preview has
+	// long-horizon autoregressive drift — on episodes past ~3-4 min the
+	// dominant voice loses ~20 dB of signal. Rendering in ~90s chunks
+	// resets the model's hidden state each call, then per-chunk EBU R128
+	// loudnorm flattens boundary mismatches before concatenation.
+	chunks := voice.ChunkDialogue(script.Dialogue, voice.DefaultChunkTargetSeconds)
+	if len(chunks) == 0 {
+		return fmt.Errorf("authored dialogue produced no chunks (dialogue length=%d)", len(script.Dialogue))
+	}
+	fmt.Fprintf(os.Stderr, "→ render (Gemini TTS multi-speaker, %s)…\n", voice.SplitAnnouncement(chunks))
+
+	speakers := []llm.Speaker{
 		{Speaker: narrator.Name, VoiceName: narrator.VoiceID},
 		{Speaker: companion.Name, VoiceName: companion.VoiceID},
-	})
-	if err != nil {
-		return fmt.Errorf("gemini multi-speaker: %w", err)
 	}
-	if err := writeWav(outputPath, pcm); err != nil {
+	var fullPCM []byte
+	for i, chunk := range chunks {
+		chunkScript := &voice.PodcastScript{
+			Title:    script.Title,
+			Dialogue: chunk,
+		}
+		// ColdOpenNote belongs to the episode's opening, not every
+		// chunk — only the first chunk carries it so the subsequent
+		// chunks don't repeat the cold-open framing as director notes.
+		if i == 0 {
+			chunkScript.ColdOpenNote = script.ColdOpenNote
+		}
+		chunkPrompt := voice.RenderPodcastGeminiPrompt(chunkScript, narrator, companion)
+		chunkStart := time.Now()
+		chunkPCM, err := llm.MultiSpeakerTTS(ctx, secrets.GeminiKey, chunkPrompt, speakers)
+		if err != nil {
+			return fmt.Errorf("gemini multi-speaker (chunk %d/%d): %w", i+1, len(chunks), err)
+		}
+		normalizedPCM, err := voice.NormalizePCM(ctx, chunkPCM, 24000, voice.DefaultLoudnormTarget)
+		if err != nil {
+			return fmt.Errorf("loudnorm (chunk %d/%d): %w", i+1, len(chunks), err)
+		}
+		fmt.Fprintf(os.Stderr, "  chunk %d/%d: %d lines, %d→%d bytes, %.1fs\n",
+			i+1, len(chunks), len(chunk), len(chunkPCM), len(normalizedPCM), time.Since(chunkStart).Seconds())
+		fullPCM = append(fullPCM, normalizedPCM...)
+	}
+	if err := writeWav(outputPath, fullPCM); err != nil {
 		return err
 	}
 
-	// Sidecar .meta.json with podcast-specific metadata.
+	// Sidecar .meta.json — summary metadata for show notes / listings.
 	metaPath := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".meta.json"
 	meta := map[string]any{
 		"slug":           slug,
 		"title":          script.Title,
 		"cold_open_note": script.ColdOpenNote,
 		"line_count":     len(script.Dialogue),
+		"chunk_count":    len(chunks),
 	}
 	if err := writeMetaSidecar(metaPath, meta); err != nil {
 		return fmt.Errorf("podcast WAV written but sidecar failed: %w", err)
 	}
 
-	fmt.Printf("Generated podcast %s → %s (+ %s)\n", slug, outputPath, metaPath)
+	// Sidecar .script.json — full authored PodcastScript (title,
+	// cold_open_note, every dialogue turn with speaker/text/
+	// performance_hint). Ground truth for future debugging and the
+	// dialogue-rule sanity checklist described in the create-podcast
+	// skill. Suppressed by --no-transcript. Soft-fail: if we can't
+	// write it, the WAV is already on disk and the episode is still
+	// usable — log to stderr and continue. Agents can re-run if the
+	// script sidecar is load-bearing for their workflow.
+	scriptPath := ""
+	if !voiceNoTranscript {
+		candidate := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".script.json"
+		if err := writeScriptSidecar(candidate, script); err != nil {
+			fmt.Fprintf(os.Stderr, "  warning: script sidecar %s failed: %v (WAV still landed)\n", candidate, err)
+		} else {
+			scriptPath = candidate
+		}
+	}
+
+	if scriptPath != "" {
+		fmt.Printf("Generated podcast %s → %s (+ %s + %s)\n", slug, outputPath, filepath.Base(metaPath), filepath.Base(scriptPath))
+	} else {
+		fmt.Printf("Generated podcast %s → %s (+ %s)\n", slug, outputPath, filepath.Base(metaPath))
+	}
+	return nil
+}
+
+// writeScriptSidecar writes a PodcastScript to `path` as 2-space indented
+// JSON. Closes the file even on encode failure. Caller treats any error
+// as non-fatal — the WAV is the primary artifact.
+func writeScriptSidecar(path string, script *voice.PodcastScript) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(script); err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
 	return nil
 }
 
