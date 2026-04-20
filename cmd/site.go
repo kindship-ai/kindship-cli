@@ -215,6 +215,7 @@ var (
 	pushDir     string
 	pushMessage string
 	pushOnly    []string
+	pushDryRun  bool
 	logsBuild   int
 )
 
@@ -231,6 +232,7 @@ func init() {
 	sitePushCmd.Flags().StringVar(&pushDir, "dir", "", "Directory to upload (defaults to the canonical site workspace)")
 	sitePushCmd.Flags().StringVar(&pushMessage, "message", "Deploy from agent", "Commit message")
 	sitePushCmd.Flags().StringArrayVar(&pushOnly, "only", nil, "Clone HEAD into a temp dir, overlay only the matching file(s) from the worktree, and push the overlay. Repeatable. Requires at least one commit on the site repo.")
+	sitePushCmd.Flags().BoolVar(&pushDryRun, "dry-run", false, "Inspect the archive and report what would change without triggering a build. Returns changed files and affected routes.")
 
 	siteLogsCmd.Flags().IntVar(&logsBuild, "build", 0, "Build number (default: latest)")
 
@@ -1029,6 +1031,9 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 	writer.Close()
 
 	endpoint := fmt.Sprintf("%s/api/cli/site/push", ctx.APIBaseURL)
+	if pushDryRun {
+		endpoint = fmt.Sprintf("%s/api/cli/site/push/dry-run", ctx.APIBaseURL)
+	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, &requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -1052,6 +1057,23 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 
 	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
 		return fmt.Errorf("push failed: %w", err)
+	}
+
+	if pushDryRun {
+		var dryResp api.SitePushDryRunResponse
+		if err := json.Unmarshal(body, &dryResp); err != nil {
+			return fmt.Errorf("failed to parse dry-run response: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			if dryResp.Error != "" {
+				return fmt.Errorf("dry-run failed: %s", dryResp.Error)
+			}
+			return fmt.Errorf("dry-run failed (%d): %s", resp.StatusCode, string(body))
+		}
+		if siteFormat == "json" {
+			return printJSON(dryResp)
+		}
+		return renderDryRun(dryResp, dir)
 	}
 
 	var pushResp api.SitePushResponse
@@ -1784,6 +1806,73 @@ func formatRelativeTimestamp(unixTimestamp int64) string {
 	}
 	t := time.Unix(unixTimestamp, 0)
 	return formatDuration(time.Since(t))
+}
+
+// renderDryRun prints a human-friendly summary of what a push would
+// change. Routes are shown first (agents care about which URLs move);
+// file-level changes come second; skipped files are surfaced only when
+// present.
+func renderDryRun(resp api.SitePushDryRunResponse, sourceDir string) error {
+	mode := "full push"
+	if resp.Partial {
+		mode = "partial (--only) push"
+	}
+	fmt.Printf("Dry run — %s from %s\n", mode, sourceDir)
+	fmt.Printf("  %d files in archive, %d would change\n", resp.FilesInArchive, len(resp.Changes))
+
+	if len(resp.AffectedRoutes) > 0 {
+		fmt.Println("\nAffected routes:")
+		for _, r := range resp.AffectedRoutes {
+			fmt.Printf("  %s\n", r)
+		}
+	}
+
+	if len(resp.Changes) > 0 {
+		added, modified, deleted := 0, 0, 0
+		for _, c := range resp.Changes {
+			switch c.Status {
+			case "added":
+				added++
+			case "modified":
+				modified++
+			case "deleted":
+				deleted++
+			}
+		}
+		fmt.Printf("\nChanges: %d added, %d modified, %d deleted\n", added, modified, deleted)
+		// Cap to 50 lines to keep output bounded; agents who want full
+		// detail can rerun with --format json.
+		limit := 50
+		if len(resp.Changes) < limit {
+			limit = len(resp.Changes)
+		}
+		for i := 0; i < limit; i++ {
+			c := resp.Changes[i]
+			sym := "?"
+			switch c.Status {
+			case "added":
+				sym = "A"
+			case "modified":
+				sym = "M"
+			case "deleted":
+				sym = "D"
+			}
+			fmt.Printf("  %s %s\n", sym, c.Path)
+		}
+		if len(resp.Changes) > limit {
+			fmt.Printf("  ... and %d more (use --format json for full list)\n", len(resp.Changes)-limit)
+		}
+	}
+
+	if len(resp.SkippedReserved) > 0 {
+		fmt.Printf("\nSkipped reserved: %s\n", strings.Join(resp.SkippedReserved, ", "))
+	}
+	if len(resp.SkippedDenied) > 0 {
+		fmt.Printf("Skipped denied: %s\n", strings.Join(resp.SkippedDenied, ", "))
+	}
+
+	fmt.Println("\nNo build was triggered.")
+	return nil
 }
 
 func formatDuration(d time.Duration) string {

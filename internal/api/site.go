@@ -63,6 +63,26 @@ type SitePushResponse struct {
 	Error           string   `json:"error,omitempty"`
 }
 
+// SitePushDryRunChange describes a single file that would change in a push.
+// Status values mirror git diff semantics: "added", "modified", "deleted".
+type SitePushDryRunChange struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+	Size   int    `json:"size,omitempty"`
+}
+
+// SitePushDryRunResponse is the response from POST /api/cli/site/push/dry-run.
+// Reports what a push would change without triggering a build.
+type SitePushDryRunResponse struct {
+	FilesInArchive  int                    `json:"files_in_archive"`
+	Changes         []SitePushDryRunChange `json:"changes"`
+	AffectedRoutes  []string               `json:"affected_routes"`
+	SkippedReserved []string               `json:"skipped_reserved"`
+	SkippedDenied   []string               `json:"skipped_denied"`
+	Partial         bool                   `json:"partial"`
+	Error           string                 `json:"error,omitempty"`
+}
+
 // SiteLogsResponse is the response from GET /api/cli/site/logs
 type SiteLogsResponse struct {
 	BuildNumber int             `json:"build_number"`

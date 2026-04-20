@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +70,7 @@ var (
 	umListLimit           int
 	umListIncludeFixtures bool
 	umListIncludeDisposed bool
+	umListSort            string // "newest" (default) | "oldest"
 	umDisposeCode         string
 	umDisposeNote         string
 )
@@ -448,7 +450,9 @@ func runUserMessagingList(_ *cobra.Command, _ []string) error {
 		fmt.Println("(no messages)")
 		return nil
 	}
-	for _, m := range out.Items {
+
+	items := sortUserMessages(out.Items, umListSort)
+	for _, m := range items {
 		// Subject priority for the list view mirrors the server's
 		// notification priority: tldr → title → body.
 		subject := m.Body
@@ -464,20 +468,84 @@ func runUserMessagingList(_ *cobra.Command, _ []string) error {
 		if urgency == "" {
 			urgency = "daily" // server default; older rows may omit
 		}
-		// Plan requires one-line format with urgency + tldr + on_answer_note
-		// inline. on-answer is appended to the same row when present so a
-		// heartbeat scan sees the resume cue at a glance without a second line.
-		line := fmt.Sprintf("%s  %-11s %-9s %-12s %-6s  %s", m.ID, m.Status, urgency, m.Agency, m.Type, subject)
+		when := relativeTime(effectiveTimestamp(m))
+		// One-line format: id, relative time, status, urgency, agency, type,
+		// subject. on_answer_note is appended inline when present so a
+		// heartbeat scan sees the resume cue at a glance.
+		line := fmt.Sprintf("%s  %-9s %-11s %-9s %-12s %-6s  %s", m.ID, when, m.Status, urgency, m.Agency, m.Type, subject)
 		if m.OnAnswerNote != nil && *m.OnAnswerNote != "" {
 			note := *m.OnAnswerNote
-			if len(note) > 80 {
-				note = note[:77] + "..."
+			// Widened from the prior 80-char cap; 180 fits modern terminals
+			// without wrapping while still bounding pathological rows.
+			if len(note) > 180 {
+				note = note[:177] + "..."
 			}
 			line += fmt.Sprintf("  ⟵ on-answer: %s", note)
 		}
 		fmt.Println(line)
 	}
 	return nil
+}
+
+// effectiveTimestamp returns the timestamp that best represents "when did
+// this row last become interesting" — answered_at if set, else created_at.
+// Used for both default sorting and the relative-time column.
+func effectiveTimestamp(m api.UserMessage) string {
+	if m.AnsweredAt != nil && *m.AnsweredAt != "" {
+		return *m.AnsweredAt
+	}
+	return m.CreatedAt
+}
+
+// sortUserMessages returns a copy sorted by effective timestamp.
+// order: "newest" (default) → most recent first; "oldest" → earliest first.
+// Unknown values fall through to "newest" so an agent typo doesn't surface
+// a confusing ordering.
+func sortUserMessages(items []api.UserMessage, order string) []api.UserMessage {
+	out := make([]api.UserMessage, len(items))
+	copy(out, items)
+	sort.SliceStable(out, func(i, j int) bool {
+		ti := effectiveTimestamp(out[i])
+		tj := effectiveTimestamp(out[j])
+		if order == "oldest" {
+			return ti < tj
+		}
+		return ti > tj
+	})
+	return out
+}
+
+// relativeTime renders an ISO-8601 timestamp as "5m ago", "3h ago",
+// "2d ago", etc. Falls back to the raw date if the input is unparseable
+// or older than ~30 days.
+func relativeTime(iso string) string {
+	if iso == "" {
+		return "—"
+	}
+	t, err := time.Parse(time.RFC3339Nano, iso)
+	if err != nil {
+		// Try the plain RFC3339 form (no fractional seconds).
+		t, err = time.Parse(time.RFC3339, iso)
+		if err != nil {
+			if len(iso) >= 10 {
+				return iso[:10]
+			}
+			return iso
+		}
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	default:
+		return t.Format("2006-01-02")
+	}
 }
 
 // ---- remind / retract ----
@@ -756,6 +824,7 @@ func init() {
 	userMessagingListCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	userMessagingListCmd.Flags().BoolVar(&umListIncludeFixtures, "include-fixtures", false, "Include smoke-test/synthetic fixture rows (default: excluded)")
 	userMessagingListCmd.Flags().BoolVar(&umListIncludeDisposed, "include-disposed", false, "Include rows previously disposed via 'dispose' (default: excluded)")
+	userMessagingListCmd.Flags().StringVar(&umListSort, "sort", "newest", "Sort order for human view: newest|oldest (by answered_at, falling back to created_at)")
 	userMessagingRemindCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	userMessagingRetractCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	userMessagingDisposeCmd.Flags().StringVar(&umDisposeCode, "code", "", "Machine label for the disposition (e.g. smoke-test-fixture, obsolete, handled-elsewhere) — required")
