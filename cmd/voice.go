@@ -948,10 +948,14 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 
 	// Chunked multi-speaker render. Gemini 3.1 Flash TTS preview has
 	// long-horizon autoregressive drift — on episodes past ~3-4 min the
-	// dominant voice loses ~20 dB of signal. Rendering in ~90s chunks
-	// resets the model's hidden state each call, then per-chunk EBU R128
-	// loudnorm flattens boundary mismatches before concatenation.
-	chunks := voice.ChunkDialogue(script.Dialogue, voice.DefaultChunkTargetSeconds)
+	// dominant voice loses ~20 dB of signal. Rendering in ~180s chunks
+	// resets the model's hidden state each call, per-chunk EBU R128
+	// loudnorm flattens level mismatches, and an equal-power linear
+	// crossfade at every chunk boundary masks the residual per-chunk
+	// voice-interpretation variance (Gemini picks slightly different
+	// prosody for the same voice between separate calls). Chunk size
+	// overridable via KINDSHIP_VOICE_CHUNK_SECONDS; 0 disables chunking.
+	chunks := voice.ChunkDialogue(script.Dialogue, voice.ChunkTargetSeconds())
 	if len(chunks) == 0 {
 		return fmt.Errorf("authored dialogue produced no chunks (dialogue length=%d)", len(script.Dialogue))
 	}
@@ -961,7 +965,7 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 		{Speaker: narrator.Name, VoiceName: narrator.VoiceID},
 		{Speaker: companion.Name, VoiceName: companion.VoiceID},
 	}
-	var fullPCM []byte
+	chunkPCMs := make([][]byte, 0, len(chunks))
 	for i, chunk := range chunks {
 		chunkScript := &voice.PodcastScript{
 			Title:    script.Title,
@@ -985,7 +989,15 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "  chunk %d/%d: %d lines, %d→%d bytes, %.1fs\n",
 			i+1, len(chunks), len(chunk), len(chunkPCM), len(normalizedPCM), time.Since(chunkStart).Seconds())
-		fullPCM = append(fullPCM, normalizedPCM...)
+		chunkPCMs = append(chunkPCMs, normalizedPCM)
+	}
+	fullPCM, err := voice.ConcatWithCrossfade(chunkPCMs, 24000, voice.DefaultCrossfadeSeconds)
+	if err != nil {
+		return fmt.Errorf("concat chunks: %w", err)
+	}
+	if len(chunks) > 1 {
+		fmt.Fprintf(os.Stderr, "  concatenated %d chunks with %.0fms crossfade\n",
+			len(chunks), voice.DefaultCrossfadeSeconds*1000)
 	}
 	if err := writeWav(outputPath, fullPCM); err != nil {
 		return err

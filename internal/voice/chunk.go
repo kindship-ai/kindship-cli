@@ -2,6 +2,8 @@ package voice
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -14,12 +16,25 @@ const chunkWPM = 150
 
 // DefaultChunkTargetSeconds is the default target length of a single
 // MultiSpeakerTTS chunk. Google's own guidance puts ~3-4 minutes as the
-// safe ceiling for the preview model; chunks in the 80-90s range stay
-// well inside that with headroom for variability in word-per-second
-// rate. Setting it too low pays the per-request overhead too many
-// times; too high and the drift this chunking is designed to avoid
-// starts to creep back in.
-const DefaultChunkTargetSeconds = 90
+// safe ceiling for the preview model; we target 180s so each episode
+// produces roughly half as many chunk boundaries as a 90s setting,
+// which makes chunk-boundary voice-interpretation variance less
+// audible. Tune via KINDSHIP_VOICE_CHUNK_SECONDS if you want to
+// experiment (0 or negative disables chunking — single-call render).
+const DefaultChunkTargetSeconds = 180
+
+// ChunkTargetSeconds returns the currently-configured target chunk
+// length. Callers pass this into ChunkDialogue. Env var
+// KINDSHIP_VOICE_CHUNK_SECONDS overrides the compiled default so
+// operators can tune without a CLI release.
+func ChunkTargetSeconds() int {
+	if v := os.Getenv("KINDSHIP_VOICE_CHUNK_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return DefaultChunkTargetSeconds
+}
 
 // ChunkDialogue partitions `lines` into sub-slices where the cumulative
 // estimated spoken audio of each chunk is close to (but not exceeding)
