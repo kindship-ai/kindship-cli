@@ -108,9 +108,14 @@ func RenderExactPrompt(voice, style, text string) string {
 	return fmt.Sprintf("[%s, %s] %s", voice, style, text)
 }
 
-// RenderMonologueGeminiPrompt builds the full Gemini Live prompt
+// RenderMonologueGeminiPrompt builds the full Gemini TTS prompt
 // (profile + scene + director notes + persona tag + transcript) for
 // a single-speaker monologue render pass.
+//
+// Audio tags ([pause], [breath], [softly], etc.) are inserted by the
+// Opus tag pass upstream — this function does NOT ask Gemini to
+// improvise tags. The transcript is used as-is; if the tag pass ran,
+// tags are already inline in beat.Text.
 func RenderMonologueGeminiPrompt(
 	script *MonologueScript,
 	profile SpeakerProfile,
@@ -120,10 +125,8 @@ func RenderMonologueGeminiPrompt(
 	fmt.Fprintf(&b, "## THE SCENE\n%s\n\n", defaultMonologueScene)
 	fmt.Fprintf(&b, "### DIRECTOR'S NOTES\n\nStyle: %s\n\n", defaultDirectorStyle)
 	b.WriteString("Pace: Natural pace. Let phrases breathe. Pauses are real pauses, not polite gaps. When a beat ends with \"…\" or \"—\", honor it in the timing.\n\n")
-	b.WriteString("Dynamics: Low. Close-mic, intimate, not projected. No whispers. No shouting.\n\n")
+	b.WriteString("Dynamics: Low. Close-mic, intimate, not projected. No shouting. Honor inline audio tags ([pause], [breath], [softly], etc.) verbatim.\n\n")
 	b.WriteString("### PERFORMANCE GUIDANCE\n\nFor each beat, follow the text as written. Where a performance_hint is provided, let it shape delivery. Where no hint is provided, deliver naturally based on context and the speaker's personality.\n\n")
-	b.WriteString("Inject where it fits organically:\n- [thinking] or [searching for a word] before beats where hesitation lives in the text\n- [short pause] between arc sections\n\n")
-	b.WriteString("Do not over-inject. If tags appear on more than a fifth of beats, you're overdoing it.\n\n")
 	b.WriteString("#### TRANSCRIPT\n\n")
 	fmt.Fprintf(&b, "[%s, %s]\n\n", profile.VoiceID, profile.BehavioralClause)
 	for _, beat := range script.Beats {

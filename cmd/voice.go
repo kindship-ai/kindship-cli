@@ -36,6 +36,8 @@ const (
 	voicePromptMonoIdeateU = "monologue-ideate-user"
 	voicePromptMonoAuthorS = "monologue-author-system"
 	voicePromptMonoAuthorU = "monologue-author-user"
+	voicePromptMonoTagS    = "monologue-tag-system"
+	voicePromptMonoTagU    = "monologue-tag-user"
 	voicePromptPodIdeateS  = "podcast-ideate-system"
 	voicePromptPodIdeateU  = "podcast-ideate-user"
 	voicePromptPodAuthorS  = "podcast-author-system"
@@ -481,23 +483,46 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Render via Gemini Live (single voice, audio-out).
-	geminiPrompt := voice.RenderMonologueGeminiPrompt(script, profile)
-	fmt.Fprintln(os.Stderr, "→ render (Gemini Live)…")
-	pcm, err := llm.SingleSpeakerLive(ctx, secrets.GeminiKey, narratorVoice, geminiPrompt)
+	// Pass 3 — tag (skippable with --keep-dry).
+	//
+	// Opus inserts Gemini 3.1 Flash TTS audio tags ([pause], [breath],
+	// [softly], etc.) into beat.text. The authored prose is preserved
+	// verbatim — the pass is additive, not a rewrite. On parse failure
+	// or a prose-rewrite detection we log and fall back to the untagged
+	// script (render still succeeds; no tagged sidecar written).
+	renderScript := script
+	tagPassUsed := false
+	if !voiceKeepDry {
+		tagged, tagErr := runMonologueTagPass(ctx, secrets, profile, script)
+		if tagErr != nil {
+			fmt.Fprintf(os.Stderr, "→ tag (Opus): falling back to untagged script — %v\n", tagErr)
+		} else {
+			renderScript = tagged
+			tagPassUsed = true
+			fmt.Fprintln(os.Stderr, "→ tag (Opus 4.6): inserted audio tags")
+		}
+	}
+
+	// Render via Gemini TTS REST (single voice, audio-out). Swapped off
+	// Gemini Live — Live is for realtime bidirectional audio; Flash TTS
+	// renders higher-quality voice-over with the same voice roster.
+	geminiPrompt := voice.RenderMonologueGeminiPrompt(renderScript, profile)
+	fmt.Fprintln(os.Stderr, "→ render (Gemini TTS)…")
+	pcm, err := llm.SingleSpeakerTTS(ctx, secrets.GeminiKey, narratorVoice, geminiPrompt)
 	if err != nil {
-		return fmt.Errorf("gemini live: %w", err)
+		return fmt.Errorf("gemini TTS: %w", err)
 	}
 	if err := writeWav(outputPath, pcm); err != nil {
 		return err
 	}
 
-	// Transcript sidecar — the joined beat text (what Opus authored,
-	// not what Gemini actually spoke, which can differ subtly). Useful
-	// metadata for agents who want to captions/compare/re-align. Opt
-	// out with --no-transcript on rare cases where the .txt file
-	// isn't wanted next to the WAV.
+	// Transcript sidecars — the authored raw beat text (no audio tags)
+	// lands at <slug>.transcript.txt; when the tag pass ran, a sibling
+	// <slug>.transcript.tagged.txt captures the tagged text Gemini
+	// actually saw. Raw is best for captions / re-alignment / SEO;
+	// tagged is for debugging delivery. --no-transcript suppresses both.
 	transcriptPath := ""
+	taggedTranscriptPath := ""
 	if !voiceNoTranscript {
 		transcriptPath = transcriptSidecarPath(outputPath)
 		parts := make([]string, 0, len(script.Beats))
@@ -509,6 +534,20 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 		transcript := strings.Join(parts, "\n\n")
 		if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
 			return fmt.Errorf("write transcript sidecar: %w", err)
+		}
+
+		if tagPassUsed {
+			taggedTranscriptPath = taggedTranscriptSidecarPath(outputPath)
+			taggedParts := make([]string, 0, len(renderScript.Beats))
+			for _, b := range renderScript.Beats {
+				if b.Text != "" {
+					taggedParts = append(taggedParts, b.Text)
+				}
+			}
+			taggedTranscript := strings.Join(taggedParts, "\n\n")
+			if err := os.WriteFile(taggedTranscriptPath, []byte(taggedTranscript), 0o644); err != nil {
+				return fmt.Errorf("write tagged transcript sidecar: %w", err)
+			}
 		}
 	}
 
@@ -522,11 +561,19 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 		if transcriptPath != "" {
 			out["transcript_path"] = transcriptPath
 		}
+		if taggedTranscriptPath != "" {
+			out["tagged_transcript_path"] = taggedTranscriptPath
+		}
+		out["tag_pass_used"] = tagPassUsed
 		return printJSON(out)
 	}
 	tail := ""
 	if transcriptPath != "" {
-		tail = fmt.Sprintf(" (+ %s)", filepath.Base(transcriptPath))
+		if taggedTranscriptPath != "" {
+			tail = fmt.Sprintf(" (+ %s + %s)", filepath.Base(transcriptPath), filepath.Base(taggedTranscriptPath))
+		} else {
+			tail = fmt.Sprintf(" (+ %s)", filepath.Base(transcriptPath))
+		}
 	}
 	fmt.Printf("Generated %s → %s (%d beats)%s\n", slug, outputPath, len(script.Beats), tail)
 	return nil
@@ -543,6 +590,93 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 func transcriptSidecarPath(audioPath string) string {
 	ext := filepath.Ext(audioPath)
 	return strings.TrimSuffix(audioPath, ext) + ".transcript.txt"
+}
+
+// taggedTranscriptSidecarPath is the sibling <audio-stem>.transcript.tagged.txt
+// that captures the exact text Gemini TTS received — authored prose plus
+// audio tags ([pause], [breath], etc.) inserted by the Opus tag pass.
+// Useful for debugging delivery issues: if the render sounds off, read
+// the tagged transcript to see what the TTS was asked to do.
+func taggedTranscriptSidecarPath(audioPath string) string {
+	ext := filepath.Ext(audioPath)
+	return strings.TrimSuffix(audioPath, ext) + ".transcript.tagged.txt"
+}
+
+// audioTagPattern matches ONLY the tag vocabulary the Opus tag pass is
+// allowed to emit — match exactly what monologue-tag-system.md
+// whitelists, nothing else. An unknown-token bracket span is treated
+// as prose (not stripped), which surfaces as a validator mismatch and
+// triggers the soft fallback. This is deliberate: a loose `\[[^\]]*\]`
+// regex would hide prose rewrites behind bracket-shaped edits and
+// would also mangle authored prose that happens to contain brackets.
+//
+// Keep in sync with kindship-voice/prompts/monologue-tag-system.md
+// AUDIO TAG VOCABULARY section.
+var audioTagPattern = regexp.MustCompile(`\[(pause|short pause|long pause|breath|inhale|softly|emphasizes|slowly|thoughtfully)\]`)
+
+// normalizeForProseCheck strips known audio tags from `s` and collapses
+// whitespace, returning a form suitable for comparing a tagged beat
+// against its authored original. Authored prose (which may legitimately
+// contain bracketed spans like [sic] or [redacted]) passes through
+// untouched; only the whitelisted audio tags are removed.
+func normalizeForProseCheck(s string) string {
+	return strings.Join(strings.Fields(audioTagPattern.ReplaceAllString(s, " ")), " ")
+}
+
+// runMonologueTagPass runs the third Opus pass (tag) over an already-
+// authored monologue script. Returns a new *MonologueScript with audio
+// tags inlined into beat.text, or an error if the pass fails or the
+// tagged output is not prose-preserving.
+//
+// Callers (runVoiceGenerate) should treat errors as a soft fallback —
+// log to stderr, continue rendering with the untagged script. The tag
+// pass is an enhancement, not a requirement.
+func runMonologueTagPass(
+	ctx context.Context,
+	secrets *voiceSecrets,
+	profile voice.SpeakerProfile,
+	authored *voice.MonologueScript,
+) (*voice.MonologueScript, error) {
+	authoredJSON, err := json.Marshal(authored)
+	if err != nil {
+		return nil, fmt.Errorf("serialize authored script: %w", err)
+	}
+	tagSystem, err := prompts.LoadAndRender(voiceSkillMono, voicePromptMonoTagS, map[string]string{
+		"speaker_profile":      voice.RenderSpeakerProfile(profile),
+		"authored_script_json": string(authoredJSON),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load tag system prompt: %w", err)
+	}
+	tagUser, err := prompts.LoadAndRender(voiceSkillMono, voicePromptMonoTagU, map[string]string{})
+	if err != nil {
+		return nil, fmt.Errorf("load tag user prompt: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "→ tag (Opus 4.6 + 16k thinking)…")
+	tagResp, err := callOpus(ctx, secrets, tagSystem, tagUser)
+	if err != nil {
+		return nil, fmt.Errorf("Opus tag pass failed: %w", err)
+	}
+	raw := tagResp.TextOutput()
+	if raw == "" {
+		return nil, fmt.Errorf("Opus tag pass returned empty text (stop_reason=%q)", tagResp.StopReason)
+	}
+	tagged, err := voice.ParseMonologueScript(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse tagged script: %w", err)
+	}
+	if len(tagged.Beats) != len(authored.Beats) {
+		return nil, fmt.Errorf("tag pass changed beat count (%d → %d)", len(authored.Beats), len(tagged.Beats))
+	}
+	// Prose-preservation validator — tagged.Beats[i].text minus bracket
+	// tags and whitespace must equal authored.Beats[i].text minus
+	// whitespace. If it doesn't, Opus ignored the tags-only rule.
+	for i := range tagged.Beats {
+		if normalizeForProseCheck(tagged.Beats[i].Text) != normalizeForProseCheck(authored.Beats[i].Text) {
+			return nil, fmt.Errorf("tag pass rewrote prose in beat %d (expected tags-only insertion)", i+1)
+		}
+	}
+	return tagged, nil
 }
 
 // ---------- voice exact ----------
