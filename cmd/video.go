@@ -68,10 +68,13 @@ var videoPublishCmd = &cobra.Command{
                              (produced by esbuild — see SKILL.md)
   <dir>/compositions.json  — Remotion compositions manifest
                              ('npx remotion compositions ./src/index.ts --json > compositions.json')
-  <dir>/public/            — optional, included if present (images, fonts; audio goes in music/)
-  <dir>/music/             — optional, signature audio sidecar
+  <dir>/public/            — optional, included if present (images, fonts; audio goes in music/ or narration/)
+  <dir>/music/             — optional, signature audio sidecar (reusable across videos)
                              (referenced by compositions via new URL('./music/<slug>.mp3', import.meta.url).href);
                              see kindship-video SKILL step 4 for the <Audio> wiring
+  <dir>/narration/         — optional, per-video voice-over WAV(s) from 'kindship voice …'
+                             (referenced by compositions via new URL('./narration/<slug>.wav', import.meta.url).href);
+                             unlike music, narration is rendered fresh per video, not curated
   <dir>/poster.png         — optional, used as the Videos tab thumbnail
                              (produced by 'npx remotion still <id> poster.png --frame=<N> --scale=0.5');
                              only the exact lowercase filename 'poster.png' at root is recognized
@@ -418,6 +421,39 @@ func createVideoArchive(compositionMjs, compositionsFile, publicDir string) (*by
 		})
 		if walkErr != nil {
 			return nil, 0, fmt.Errorf("failed to walk music dir: %w", walkErr)
+		}
+	}
+
+	// Optional: walk <slug-dir>/narration/ — per-video voice-over
+	// WAVs. Structurally identical to music/ (sibling of composition.
+	// mjs, resolved via `new URL('./narration/<slug>.wav', import.meta
+	// .url).href`), but conceptually one-off: `kindship voice …` writes
+	// straight here, no library semantics. Kept distinct from music/
+	// so the two roles — reusable signature bed vs disposable per-video
+	// narration — stay legible on disk and in the bundle.
+	narrationDir := filepath.Join(filepath.Dir(compositionMjs), "narration")
+	if info, err := os.Stat(narrationDir); err == nil && info.IsDir() {
+		baseDir := filepath.Dir(narrationDir) // <slug-dir>
+		walkErr := filepath.Walk(narrationDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 || info.IsDir() || !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(baseDir, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel) // "narration/<...>"
+			if err := writeTarEntry(tw, rel, info, path); err != nil {
+				return err
+			}
+			fileCount++
+			return nil
+		})
+		if walkErr != nil {
+			return nil, 0, fmt.Errorf("failed to walk narration dir: %w", walkErr)
 		}
 	}
 

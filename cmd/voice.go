@@ -47,8 +47,17 @@ const (
 	voiceDefaultTargetMinutes = 3
 	voiceDefaultPodcastLength = "5-7 minutes"
 
-	voiceDefaultMonoDir   = "/workspace/documents/voice"
-	voiceDefaultPodDir    = "/workspace/documents/podcasts"
+	// Voice-overs are per-video, one-off: they travel WITH the video,
+	// not in a shared artifact library. Default to a cwd-relative
+	// `narration/` directory — when the agent runs `kindship voice …`
+	// from inside a video workspace, the WAV lands exactly where the
+	// CLI's archive walker picks it up (see cmd/video.go's narration
+	// sibling walk) and where the composition expects it via
+	// `new URL('./narration/<slug>.wav', import.meta.url).href`.
+	voiceDefaultMonoSubdir = "narration"
+	// Podcasts are standalone artifacts, not tied to a video. Keep
+	// them in the shared documents library.
+	voiceDefaultPodDir = "/workspace/documents/podcasts"
 	voiceStyleMdPath      = "/workspace/documents/STYLE.md"
 	voiceBatchPacingSecs  = 7
 	voiceDefaultSpeakerRole = "narrator"
@@ -95,7 +104,15 @@ The CLI runs two Opus passes (ideate → author) via LiteLLM and
 renders via Gemini Live using the narrator voice from your STYLE.md
 Sound section (overridable with --voice and --style).
 
-Output lands at /workspace/documents/voice/<slug>.wav by default.`,
+By default the WAV lands at ./narration/<slug>.wav relative to the
+current directory. Run from inside a video workspace (cd /workspace/
+videos/<video>) and the file drops into place next to composition.mjs,
+ready for the canonical audio import:
+
+  const voice = new URL('./narration/<slug>.wav', import.meta.url).href;
+  <Audio src={voice} />
+
+The CLI's video archive walker picks up narration/ automatically.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runVoiceGenerate,
 }
@@ -142,7 +159,7 @@ func init() {
 	voiceCmd.Flags().StringVar(&voiceVoice, "voice", "", "Gemini voice ID; default from STYLE.md narrator entry")
 	voiceCmd.Flags().StringVar(&voiceStyle, "style", "", "behavioral clause e.g. \"gravelly, measured, older scholar\"")
 	voiceCmd.Flags().IntVar(&voiceTargetMinutes, "target-minutes", 0, "finished audio target length (default server-chosen, ~3)")
-	voiceCmd.Flags().StringVar(&voiceOutput, "output", "", "destination path (default /workspace/documents/voice/<slug>.wav)")
+	voiceCmd.Flags().StringVar(&voiceOutput, "output", "", "destination path (default ./narration/<slug>.wav relative to cwd — run from inside a video dir)")
 	voiceCmd.Flags().StringVar(&voiceFormat, "format", "text", "success summary format: text (default) or json")
 
 	voiceExactCmd.Flags().StringVar(&voiceExactVoice, "voice", "", "Gemini voice ID (required)")
@@ -319,7 +336,10 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 
 	outputPath := voiceOutput
 	if outputPath == "" {
-		outputPath = filepath.Join(voiceDefaultMonoDir, slug+".wav")
+		// Cwd-relative — so running from inside a video workspace lands
+		// the narration next to composition.mjs, and the publish walker
+		// picks it up under "narration/<slug>.wav".
+		outputPath = filepath.Join(voiceDefaultMonoSubdir, slug+".wav")
 	}
 
 	// Resolve the narrator profile — CLI flags win; otherwise STYLE.md.
