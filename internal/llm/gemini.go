@@ -81,11 +81,33 @@ func SingleSpeakerLive(
 	wsCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(wsCtx, wsURL, nil)
+	// The official @google/genai SDK sets these headers on the WS
+	// upgrade. Without them, some Gemini Live preview models accept
+	// the setup frame and then silently ignore input frames —
+	// looks identical to a timeout. `x-goog-api-client` especially
+	// is used server-side for feature-flag routing; missing it trips
+	// a gate on 3.1-flash-live-preview. Verified by spying on the
+	// SDK's wire format (see scripts/gemini-voice-eval/06-live-sdk).
+	dialOpts := &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"User-Agent":        []string{"kindship-cli/1.0 google-genai-compat"},
+			"X-Goog-Api-Client": []string{"kindship-cli/1.0 google-genai-compat"},
+		},
+		// The Node `ws` library (used by @google/genai) negotiates
+		// permessage-deflate by default; coder/websocket defaults to
+		// CompressionDisabled. Some Gemini Live preview models appear
+		// to require the compression extension to route audio — match
+		// the SDK defaults to be safe.
+		CompressionMode: websocket.CompressionNoContextTakeover,
+	}
+	conn, resp, err := websocket.Dial(wsCtx, wsURL, dialOpts)
 	if err != nil {
 		return nil, fmt.Errorf("gemini live dial: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+	if os.Getenv("KINDSHIP_GEMINI_LIVE_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "[live] dial ok — status=%d protocol=%q\n", resp.StatusCode, resp.Header.Get("Sec-WebSocket-Protocol"))
+	}
 
 	setup := map[string]any{
 		"setup": map[string]any{
@@ -105,34 +127,52 @@ func SingleSpeakerLive(
 	if err := writeJSON(wsCtx, conn, setup); err != nil {
 		return nil, fmt.Errorf("send setup: %w", err)
 	}
+	if os.Getenv("KINDSHIP_GEMINI_LIVE_DEBUG") != "" {
+		b, _ := json.Marshal(setup)
+		fmt.Fprintf(os.Stderr, "[live] sent setup — %d bytes\n", len(b))
+	}
 
 	var chunks []byte
+	// Gemini 3.1-flash-live-preview silently ignores the legacy
+	// `clientContent` envelope and only acts on `realtimeInput` with
+	// a plain `text` field. The @google/genai SDK's sendRealtimeInput
+	// serializes to the same shape (see index.mjs
+	// liveSendRealtimeInputParametersToMldev). Verified against
+	// scripts/gemini-voice-eval/06-live-sdk.ts — the SDK emits
+	// turnComplete without needing an explicit turnComplete flag.
 	turnClient := map[string]any{
-		"clientContent": map[string]any{
-			"turns": []any{map[string]any{
-				"role":  "user",
-				"parts": []any{map[string]any{"text": text}},
-			}},
-			"turnComplete": true,
+		"realtimeInput": map[string]any{
+			"text": text,
 		},
 	}
 
-	// State machine: wait for setupComplete, send clientContent, then
+	// State machine: wait for setupComplete, send realtimeInput, then
 	// accumulate audio until turnComplete. Anything else is a signal
 	// to keep reading.
+	debug := os.Getenv("KINDSHIP_GEMINI_LIVE_DEBUG") != ""
 	for {
 		typ, payload, err := conn.Read(wsCtx)
 		if err != nil {
-			// If we've got audio already, surface it with the error so
-			// callers can salvage partial output for debugging.
+			if debug {
+				fmt.Fprintf(os.Stderr, "[live] read err — %v (chunks=%d)\n", err, len(chunks))
+			}
 			if len(chunks) == 0 {
 				return nil, fmt.Errorf("gemini live read: %w", err)
 			}
 			return chunks, fmt.Errorf("gemini live read (partial %d bytes): %w", len(chunks), err)
 		}
-		if typ != websocket.MessageText {
-			continue
+		if debug {
+			p := string(payload)
+			if len(p) > 200 {
+				p = p[:200] + "…"
+			}
+			fmt.Fprintf(os.Stderr, "[live] frame type=%d len=%d: %s\n", typ, len(payload), p)
 		}
+		// Gemini Live sends JSON envelopes as BINARY frames
+		// (MessageBinary), not text — so we can't filter on
+		// MessageText. Both types carry the same UTF-8 JSON body.
+		// We only skip unrecognized types, which shouldn't occur.
+		_ = typ
 
 		var env struct {
 			SetupComplete map[string]any `json:"setupComplete"`
@@ -159,7 +199,7 @@ func SingleSpeakerLive(
 
 		if env.SetupComplete != nil {
 			if err := writeJSON(wsCtx, conn, turnClient); err != nil {
-				return nil, fmt.Errorf("send clientContent: %w", err)
+				return nil, fmt.Errorf("send realtimeInput: %w", err)
 			}
 			continue
 		}
