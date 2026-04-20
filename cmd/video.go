@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -198,68 +197,43 @@ func runVideoPublish(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("expected at least composition.mjs + compositions.json in archive, got %d files", fileCount)
 	}
 
-	// Build multipart request
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
+	// Two-step upload: init mints a signed URL, we PUT the tarball
+	// straight to Storage, then finalize triggers the server-side
+	// publish. Old single-step multipart POST hit Vercel's 4.5MB
+	// function body cap the moment anyone tried to ship a narration
+	// WAV — this path has no such ceiling (staging bucket caps at
+	// 200MB instead).
+	archiveBytes := archiveBuf.Bytes()
+	archiveSize := len(archiveBytes)
 
-	_ = writer.WriteField("slug", slug)
-	_ = writer.WriteField("title", videoPublishTitle)
-	_ = writer.WriteField("agent_id", agentID)
-	if videoPublishDescription != "" {
-		_ = writer.WriteField("description", videoPublishDescription)
-	}
-	if videoPublishCompositionID != "" {
-		_ = writer.WriteField("composition_id", videoPublishCompositionID)
-	}
-	if videoPublishInputProps != "" {
-		_ = writer.WriteField("input_props", videoPublishInputProps)
-	}
-
-	part, err := writer.CreateFormFile("archive", "bundle.tar.gz")
+	initResp, err := postPublishInit(ctx, publishInitRequest{
+		AgentID:      agentID,
+		Slug:         slug,
+		Title:        videoPublishTitle,
+		Description:  videoPublishDescription,
+		ArchiveSize:  archiveSize,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to create form file: %w", err)
+		return fmt.Errorf("publish init failed: %w", err)
 	}
-	if _, err := io.Copy(part, archiveBuf); err != nil {
-		return fmt.Errorf("failed to write archive to form: %w", err)
-	}
-	writer.Close()
 
-	endpoint := fmt.Sprintf("%s/api/cli/videos/publish", ctx.APIBaseURL)
-	req, err := http.NewRequest(http.MethodPost, endpoint, &requestBody)
+	if err := putTarballToSignedURL(initResp.UploadURL, archiveBytes); err != nil {
+		return fmt.Errorf("upload to signed URL failed: %w", err)
+	}
+
+	videoResp, err := postPublishFinalize(ctx, publishFinalizeRequest{
+		AgentID:               agentID,
+		VideoID:               initResp.VideoID,
+		Slug:                  slug,
+		StagingPath:           initResp.StagingPath,
+		CompositionID:         videoPublishCompositionID,
+		InputProps:            videoPublishInputProps,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("publish finalize failed: %w", err)
 	}
-
-	ctx.SetAuthHeaders(req)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-Kindship-CLI-Version", Version)
-
-	client := &http.Client{Timeout: 300 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to publish video: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
-		return fmt.Errorf("publish failed: %w", err)
-	}
-
-	var videoResp api.VideoPublishResponse
-	if err := json.Unmarshal(body, &videoResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		if videoResp.Error != "" {
-			return fmt.Errorf("publish failed: %s", videoResp.Error)
-		}
-		return fmt.Errorf("publish failed (%d): %s", resp.StatusCode, string(body))
+	if videoResp.Error != "" {
+		return fmt.Errorf("publish failed: %s", videoResp.Error)
 	}
 
 	if videoFormat == "json" {
@@ -550,6 +524,183 @@ func runVideoList(_ *cobra.Command, _ []string) error {
 		fmt.Printf("%-32s %-8s %-10s %s\n", v.Slug, site, v.MP4Status, formatRelativeTime(v.UpdatedAt))
 	}
 	return nil
+}
+
+// ---- Two-step publish helpers ------------------------------------
+//
+// The publish flow used to POST a multipart tarball directly to
+// /api/cli/videos/publish, but Vercel caps serverless function
+// bodies at 4.5MB and the first narrated video blew through that on
+// its narration WAV. New flow: CLI asks the server for a signed
+// upload URL, PUTs the tarball straight into Supabase Storage, then
+// calls finalize to kick off the existing server-side publish
+// pipeline against the already-staged path.
+
+type publishInitRequest struct {
+	AgentID     string `json:"agent_id,omitempty"`
+	Slug        string `json:"slug"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	ArchiveSize int    `json:"archive_size"`
+}
+
+type publishInitResponse struct {
+	VideoID     string `json:"video_id"`
+	StagingPath string `json:"staging_path"`
+	UploadURL   string `json:"upload_url"`
+	UploadToken string `json:"upload_token,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+type publishFinalizeRequest struct {
+	AgentID       string `json:"agent_id,omitempty"`
+	VideoID       string `json:"video_id"`
+	Slug          string `json:"slug"`
+	StagingPath   string `json:"staging_path"`
+	CompositionID string `json:"composition_id,omitempty"`
+	// Kept as a raw string so we match the server's JSON-transform
+	// zod shape (it parses the string itself; we pass through).
+	InputProps string `json:"input_props,omitempty"`
+}
+
+// postPublishInit asks the server for a signed upload URL that the
+// CLI can PUT the tarball against.
+func postPublishInit(
+	ctx *auth.Context, req publishInitRequest,
+) (*publishInitResponse, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal init request: %w", err)
+	}
+	httpReq, err := http.NewRequest(
+		http.MethodPost,
+		ctx.APIBaseURL+"/api/cli/videos/publish/init",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build init request: %w", err)
+	}
+	ctx.SetAuthHeaders(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("POST init: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read init response: %w", err)
+	}
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return nil, err
+	}
+	var out publishInitResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse init response: %w: %s", err, firstBytes(body, 300))
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, fmt.Errorf("init %d: %s", resp.StatusCode, out.Error)
+		}
+		return nil, fmt.Errorf("init %d: %s", resp.StatusCode, firstBytes(body, 300))
+	}
+	if out.UploadURL == "" || out.StagingPath == "" || out.VideoID == "" {
+		return nil, fmt.Errorf("init response missing required fields: %s", firstBytes(body, 300))
+	}
+	return &out, nil
+}
+
+// putTarballToSignedURL PUTs the tarball body to the presigned URL
+// the init endpoint returned. Supabase signed upload URLs accept
+// the body directly with Content-Type signalling; no extra headers
+// needed.
+//
+// Keeps a generous timeout: staging bucket caps at 200MB, uploads
+// over common container egress (~25 Mbit/s) take ~65 seconds at
+// that ceiling. 10 minutes is pathological headroom so even a
+// throttled network won't time out before the upload completes.
+func putTarballToSignedURL(uploadURL string, body []byte) error {
+	req, err := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build PUT: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	req.ContentLength = int64(len(body))
+
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("PUT: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT %d: %s", resp.StatusCode, firstBytes(raw, 300))
+	}
+	return nil
+}
+
+// postPublishFinalize tells the server the tarball is staged and
+// ready to be extracted + processed.
+func postPublishFinalize(
+	ctx *auth.Context, req publishFinalizeRequest,
+) (*api.VideoPublishResponse, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal finalize request: %w", err)
+	}
+	httpReq, err := http.NewRequest(
+		http.MethodPost,
+		ctx.APIBaseURL+"/api/cli/videos/publish/finalize",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build finalize request: %w", err)
+	}
+	ctx.SetAuthHeaders(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("X-Kindship-CLI-Version", Version)
+
+	// Finalize waits on the Hatchet workflow; the server budgets ~4.5
+	// minutes for it internally before timing out. Our client timeout
+	// is a touch longer so we see the server's 424 instead of a
+	// connection reset.
+	client := &http.Client{Timeout: 6 * time.Minute}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("POST finalize: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read finalize response: %w", err)
+	}
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return nil, err
+	}
+	var out api.VideoPublishResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse finalize response: %w: %s", err, firstBytes(body, 300))
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, fmt.Errorf("finalize %d: %s", resp.StatusCode, out.Error)
+		}
+		return nil, fmt.Errorf("finalize %d: %s", resp.StatusCode, firstBytes(body, 300))
+	}
+	return &out, nil
+}
+
+func firstBytes(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "…"
 }
 
 func writeTarEntry(tw *tar.Writer, archivePath string, info os.FileInfo, sourcePath string) error {
