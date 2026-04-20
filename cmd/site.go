@@ -82,16 +82,10 @@ and .woodpecker.yml. Enforces max 50MB compressed and 1000 files.
 Use --only to deploy a targeted subset of files from a dirty worktree.
 With --only, 'push' clones the last committed tree (HEAD) into a temp
 dir, overlays just the matching file(s) from the worktree on top, and
-pushes the full overlay — the archive shape is still the whole site
-so the server's full-replace behavior does not wipe files that existed
-in HEAD.
+sends the archive with partial=true so the server updates only the
+shipped paths and leaves every other remote file untouched.
 
 Caveats for --only:
-  * Files present on the remote only because a previous --only push
-    overlaid an untracked file — and now not matched by this run's
-    patterns — will disappear, because the overlay is rebuilt from
-    HEAD each time. Commit untracked files before relying on them
-    across multiple --only pushes.
   * Each --only pattern must match at least one file (literal path or
     single-segment glob like '*.html'); zero matches fails fast.
   * Files matching push exclusions (.git, node_modules, .woodpecker.yml,
@@ -1021,6 +1015,9 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 	_ = writer.WriteField("site_name", siteName)
 	_ = writer.WriteField("agent_id", agentID)
 	_ = writer.WriteField("message", pushMessage)
+	if len(pushOnly) > 0 {
+		_ = writer.WriteField("partial", "true")
+	}
 
 	part, err := writer.CreateFormFile("archive", "archive.tar.gz")
 	if err != nil {
