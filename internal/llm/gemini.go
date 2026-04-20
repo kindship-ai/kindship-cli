@@ -45,12 +45,7 @@ func liveModel() string {
 	if v := os.Getenv("KINDSHIP_GEMINI_LIVE_MODEL"); v != "" {
 		return v
 	}
-	// Preview-tagged: Google rotates Live preview models frequently.
-	// Older tags like `gemini-3.1-flash-live-preview` accept setup
-	// then go silent; expect to bump this periodically. Override via
-	// KINDSHIP_GEMINI_LIVE_MODEL without a release for any in-flight
-	// rotation.
-	return "models/gemini-2.5-flash-native-audio-preview-09-2025"
+	return "models/gemini-3.1-flash-live-preview"
 }
 
 // SingleSpeakerLive renders `text` with Gemini Live API, voiceName
