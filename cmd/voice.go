@@ -209,8 +209,13 @@ func init() {
 	voiceCmd.Flags().StringVar(&voiceFormat, "format", "text", "success summary format: text (default) or json")
 	voiceCmd.Flags().BoolVar(&voiceNoTranscript, "no-transcript", false,
 		"skip writing the <slug>.transcript.txt sidecar next to the WAV")
-	_ = voiceCmd.MarkFlagRequired("voice")
-	_ = voiceCmd.MarkFlagRequired("style")
+	// --voice / --style are semantically required (see flag descriptions
+	// + runVoiceGenerate's check) but we do NOT call MarkFlagRequired on
+	// them — Cobra's required-flag error short-circuits to a terse
+	// "required flag(s) ... not set" message that skips our rich
+	// transparency message pointing agents at the STYLE.md Sound section
+	// + kindship-voice skill extraction recipe. The runtime check in
+	// runVoiceGenerate surfaces the detailed guidance instead.
 
 	voiceExactCmd.Flags().StringVar(&voiceExactVoice, "voice", "", "Gemini voice ID (required)")
 	voiceExactCmd.Flags().StringVar(&voiceExactStyle, "style", "", "behavioral clause (required)")
@@ -232,10 +237,11 @@ func init() {
 	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionPersonality, "companion-personality", "", "optional companion personality paragraph for the Opus passes")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiTargetLength, "target-length", "", "target episode length e.g. \"6-8 minutes\" (default \"5-7 minutes\")")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiOutput, "output", "", "destination path (default /workspace/documents/podcasts/<slug>.wav)")
-	_ = voiceMultiCmd.MarkFlagRequired("narrator-voice")
-	_ = voiceMultiCmd.MarkFlagRequired("narrator-style")
-	_ = voiceMultiCmd.MarkFlagRequired("companion-voice")
-	_ = voiceMultiCmd.MarkFlagRequired("companion-style")
+	// Same reasoning as the monologue path: the rich runtime error in
+	// resolvePodcastSpeaker points at STYLE.md + the create-podcast
+	// skill, so we skip Cobra's MarkFlagRequired which would short-
+	// circuit to a terse "required flag(s) ... not set" message and
+	// swallow our guidance.
 
 	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandPrompt, "prompt", "",
 		"inline prompt for Gemini; mutually exclusive with --prompt-file")
@@ -452,11 +458,11 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "→ ideate (Opus 4.6 + 16k thinking)…")
 	ideateResp, err := callOpus(ctx, secrets, ideateSystem, ideateUser)
 	if err != nil {
-		return fmt.Errorf("ideate: %w", err)
+		return fmt.Errorf("Opus ideate pass failed: %w (check LiteLLM key + LITELLM_BASE_URL)", err)
 	}
 	preScript := ideateResp.TextOutput()
 	if preScript == "" {
-		return fmt.Errorf("ideate returned empty text (stop_reason=%q)", ideateResp.StopReason)
+		return fmt.Errorf("Opus ideate pass returned no text (stop_reason=%q, model=%s). Usually the narrative was rejected or the thinking budget ran out — shorten the narrative or retry", ideateResp.StopReason, voiceOpusModel)
 	}
 
 	// Pass 2 — author
@@ -476,7 +482,7 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "→ author (Opus 4.6 + 16k thinking)…")
 	authorResp, err := callOpus(ctx, secrets, authorSystem, authorUser)
 	if err != nil {
-		return fmt.Errorf("author: %w", err)
+		return fmt.Errorf("Opus author pass failed: %w", err)
 	}
 	script, err := voice.ParseMonologueScript(authorResp.TextOutput())
 	if err != nil {
@@ -510,7 +516,7 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "→ render (Gemini TTS)…")
 	pcm, err := llm.SingleSpeakerTTS(ctx, secrets.GeminiKey, narratorVoice, geminiPrompt)
 	if err != nil {
-		return fmt.Errorf("gemini TTS: %w", err)
+		return fmt.Errorf("Gemini TTS render failed (voice=%s): %w", narratorVoice, err)
 	}
 	if err := writeWav(outputPath, pcm); err != nil {
 		return err
@@ -897,11 +903,11 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "→ ideate (Opus 4.6 + 16k thinking)…")
 	ideateResp, err := callOpus(ctx, secrets, ideateSystem, ideateUser)
 	if err != nil {
-		return fmt.Errorf("ideate: %w", err)
+		return fmt.Errorf("Opus ideate pass failed: %w (check LiteLLM key + LITELLM_BASE_URL)", err)
 	}
 	preScript := ideateResp.TextOutput()
 	if preScript == "" {
-		return fmt.Errorf("ideate returned empty text (stop_reason=%q)", ideateResp.StopReason)
+		return fmt.Errorf("Opus ideate pass returned no text (stop_reason=%q, model=%s). Usually the narrative was rejected or the thinking budget ran out — lengthen / simplify the narrative or retry", ideateResp.StopReason, voiceOpusModel)
 	}
 
 	// Pass 2 — author
@@ -923,7 +929,7 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "→ author (Opus 4.6 + 16k thinking)…")
 	authorResp, err := callOpus(ctx, secrets, authorSystem, authorUser)
 	if err != nil {
-		return fmt.Errorf("author: %w", err)
+		return fmt.Errorf("Opus author pass failed: %w", err)
 	}
 	script, err := voice.ParsePodcastScript(authorResp.TextOutput())
 	if err != nil {
