@@ -194,3 +194,68 @@ func TestWriteMetaSidecarFailsOnUnwritablePath(t *testing.T) {
 		t.Errorf("expected error writing to non-existent parent dir, got nil")
 	}
 }
+
+// Tag-pass prose-preservation validator — these tests guard the
+// bracket-whitelist invariant we committed to in Phase C. Changes to
+// the audio-tag vocabulary in monologue-tag-system.md MUST be mirrored
+// in audioTagPattern, and these tests will fail first.
+func TestNormalizeForProseCheck_StripsKnownTags(t *testing.T) {
+	in := "[pause] Welcome. [breath] I am here. [softly] Listen. [short pause] Begin."
+	want := "Welcome. I am here. Listen. Begin."
+	if got := normalizeForProseCheck(in); got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+}
+
+func TestNormalizeForProseCheck_PreservesNonAudioBrackets(t *testing.T) {
+	// Authored prose may contain [sic] or [redacted] — those are content,
+	// not audio tags, and must survive the normalize pass so a tagged
+	// beat that preserves them compares equal to the authored version.
+	in := "She said [sic] he did it [redacted]."
+	want := "She said [sic] he did it [redacted]."
+	if got := normalizeForProseCheck(in); got != want {
+		t.Errorf("non-audio brackets should survive; expected %q, got %q", want, got)
+	}
+}
+
+func TestNormalizeForProseCheck_CollapsesWhitespace(t *testing.T) {
+	in := "  Welcome.   [pause]   I   am   here.  "
+	want := "Welcome. I am here."
+	if got := normalizeForProseCheck(in); got != want {
+		t.Errorf("expected whitespace collapse %q, got %q", want, got)
+	}
+}
+
+func TestNormalizeForProseCheck_ValidatorAgreementOnTaggedVsAuthored(t *testing.T) {
+	// The critical invariant: tagging should not change the prose — a
+	// tagged beat normalizes to the same string as its authored source.
+	authored := "Welcome. I am Thoth. Enter slowly."
+	tagged := "[softly] Welcome. [pause] I am Thoth. [breath] Enter slowly. [pause]"
+	if normalizeForProseCheck(tagged) != normalizeForProseCheck(authored) {
+		t.Errorf("tagged should normalize equal to authored\n  tagged → %q\n  authored → %q",
+			normalizeForProseCheck(tagged), normalizeForProseCheck(authored))
+	}
+}
+
+func TestNormalizeForProseCheck_DetectsProseRewrite(t *testing.T) {
+	// A rewrite — even a subtle word change — must surface as a mismatch.
+	authored := "Welcome. I am Thoth."
+	tagged := "[softly] Greetings. [pause] I am Thoth."
+	if normalizeForProseCheck(tagged) == normalizeForProseCheck(authored) {
+		t.Error("validator failed to detect prose rewrite (authored 'Welcome' → tagged 'Greetings')")
+	}
+}
+
+func TestCapitalize(t *testing.T) {
+	cases := map[string]string{
+		"":          "",
+		"narrator":  "Narrator",
+		"companion": "Companion",
+		"a":         "A",
+	}
+	for in, want := range cases {
+		if got := capitalize(in); got != want {
+			t.Errorf("capitalize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

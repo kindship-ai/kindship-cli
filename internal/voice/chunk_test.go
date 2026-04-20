@@ -29,42 +29,64 @@ func TestChunkDialogue_TargetZeroIsNoOp(t *testing.T) {
 func TestChunkDialogue_SplitsOnTurnBoundary(t *testing.T) {
 	// 30-word lines ≈ 12s each at 150 wpm. With target=30s, first two
 	// lines fit (~24s), third line would push us to ~36s → new chunk.
-	thirty := strings.TrimSpace(strings.Repeat("word ", 30))
+	// Each line carries a distinct marker word so we can assert the
+	// exact boundary point, not just "a boundary exists".
+	makeText := func(marker string) string {
+		return marker + " " + strings.TrimSpace(strings.Repeat("filler ", 29))
+	}
 	in := []PodcastLine{
-		line("A", thirty),
-		line("B", thirty),
-		line("A", thirty),
-		line("B", thirty),
+		line("A", makeText("one")),
+		line("B", makeText("two")),
+		line("A", makeText("three")),
+		line("B", makeText("four")),
 	}
 	got := ChunkDialogue(in, 30)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 chunks; got %d (summary=%s)", len(got), SplitAnnouncement(got))
 	}
-	// Boundary must be on a turn boundary → chunk 1 ends after line 2,
-	// chunk 2 starts with line 3.
-	if got[0][len(got[0])-1].Text != thirty || got[1][0].Text != thirty {
-		t.Fatalf("chunk boundary landed mid-content: %+v", got)
+	if len(got[0]) != 2 || len(got[1]) != 2 {
+		t.Fatalf("expected 2+2 split on turn boundary after line 2; got %d+%d", len(got[0]), len(got[1]))
 	}
-	if len(got[0])+len(got[1]) != 4 {
-		t.Fatalf("lines lost across split: got %d+%d, want 4", len(got[0]), len(got[1]))
+	if !strings.HasPrefix(got[0][0].Text, "one") || !strings.HasPrefix(got[0][1].Text, "two") {
+		t.Fatalf("chunk 0 should contain lines one+two; got %v", []string{got[0][0].Text[:3], got[0][1].Text[:3]})
+	}
+	if !strings.HasPrefix(got[1][0].Text, "three") || !strings.HasPrefix(got[1][1].Text, "four") {
+		t.Fatalf("chunk 1 should contain lines three+four; got %v", []string{got[1][0].Text[:5], got[1][1].Text[:4]})
 	}
 }
 
 func TestChunkDialogue_OversizedLineStandsAlone(t *testing.T) {
-	// A 300-word turn (~120s) exceeds the 90s target. It must still
-	// land alone in its own chunk; splitting a turn is never OK.
+	// A 300-word turn (~120s) exceeds the 90s target. It must be in its
+	// own singleton chunk; bundling it with a neighbouring line (even a
+	// short backchannel) would push that chunk past target and defeat
+	// the anti-drift purpose of chunking.
 	huge := strings.TrimSpace(strings.Repeat("word ", 300))
 	small := "yeah"
 	in := []PodcastLine{line("A", small), line("B", huge), line("A", small)}
 	got := ChunkDialogue(in, 90)
-	// [small] [huge] [small] OR [small, huge] → depends on small's
-	// ~0.6s floor vs huge's 120s. small + huge would be 120.6s, way
-	// over — so we expect the accumulator to flush `small` into its
-	// own chunk before placing `huge`.
-	if len(got) < 2 {
-		t.Fatalf("oversized line should start a new chunk; got %d chunks: %s", len(got), SplitAnnouncement(got))
+
+	// Locate the huge line's chunk and assert it stands alone.
+	var hugeChunkIdx = -1
+	for i, c := range got {
+		for _, l := range c {
+			if l.Text == huge {
+				hugeChunkIdx = i
+				break
+			}
+		}
+		if hugeChunkIdx >= 0 {
+			break
+		}
 	}
-	// Verify no line was lost or split.
+	if hugeChunkIdx < 0 {
+		t.Fatalf("huge line not found in any chunk: %s", SplitAnnouncement(got))
+	}
+	if len(got[hugeChunkIdx]) != 1 {
+		t.Fatalf("huge oversized line must be alone in its chunk; got %d lines in chunk %d: %s",
+			len(got[hugeChunkIdx]), hugeChunkIdx, SplitAnnouncement(got))
+	}
+
+	// Sanity: total line count preserved (no splits, no drops).
 	count := 0
 	for _, c := range got {
 		count += len(c)
