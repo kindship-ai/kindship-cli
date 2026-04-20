@@ -15,13 +15,15 @@ import (
 const chunkWPM = 150
 
 // DefaultChunkTargetSeconds is the default target length of a single
-// MultiSpeakerTTS chunk. Google's own guidance puts ~3-4 minutes as the
-// safe ceiling for the preview model; we target 180s so each episode
-// produces roughly half as many chunk boundaries as a 90s setting,
-// which makes chunk-boundary voice-interpretation variance less
-// audible. Tune via KINDSHIP_VOICE_CHUNK_SECONDS if you want to
-// experiment (0 or negative disables chunking — single-call render).
-const DefaultChunkTargetSeconds = 180
+// MultiSpeakerTTS chunk. Empirically (2026-04 audition): 90s produced
+// too many audible boundaries even with crossfade; 180s reduced
+// boundary count but the chunks themselves drifted too far into
+// Gemini's long-horizon zone. 100s is the audition sweet spot —
+// enough chunks to keep per-chunk drift tight, few enough that the
+// crossfade-smoothed boundaries stay unobtrusive. Tune via
+// KINDSHIP_VOICE_CHUNK_SECONDS if you want to experiment (0 or
+// negative disables chunking — single-call render).
+const DefaultChunkTargetSeconds = 100
 
 // ChunkTargetSeconds returns the currently-configured target chunk
 // length. Callers pass this into ChunkDialogue. Env var
