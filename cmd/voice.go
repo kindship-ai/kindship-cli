@@ -58,7 +58,6 @@ const (
 	// Podcasts are standalone artifacts, not tied to a video. Keep
 	// them in the shared documents library.
 	voiceDefaultPodDir = "/workspace/documents/podcasts"
-	voiceStyleMdPath      = "/workspace/documents/STYLE.md"
 	voiceBatchPacingSecs  = 7
 	voiceDefaultSpeakerRole = "narrator"
 )
@@ -67,6 +66,8 @@ var (
 	voiceSlug          string
 	voiceVoice         string
 	voiceStyle         string
+	voicePersonality   string
+	voiceKeepDry       bool
 	voiceTargetMinutes int
 	voiceOutput        string
 	voiceFormat        string
@@ -78,15 +79,17 @@ var (
 	voiceExactOutput    string
 	voiceExactOutputDir string
 
-	voiceMultiSlug           string
-	voiceMultiNarratorVoice  string
-	voiceMultiNarratorStyle  string
-	voiceMultiNarratorName   string
-	voiceMultiCompanionVoice string
-	voiceMultiCompanionStyle string
-	voiceMultiCompanionName  string
-	voiceMultiTargetLength   string
-	voiceMultiOutput         string
+	voiceMultiSlug               string
+	voiceMultiNarratorVoice      string
+	voiceMultiNarratorStyle      string
+	voiceMultiNarratorName       string
+	voiceMultiNarratorPersonality string
+	voiceMultiCompanionVoice     string
+	voiceMultiCompanionStyle     string
+	voiceMultiCompanionName      string
+	voiceMultiCompanionPersonality string
+	voiceMultiTargetLength       string
+	voiceMultiOutput             string
 
 	voiceUnderstandPrompt     string
 	voiceUnderstandPromptFile string
@@ -110,8 +113,10 @@ three-stage pipeline: Opus plans, Opus writes, Gemini performs.
 
 For the monologue path, pass the raw narrative as the positional arg.
 The CLI runs two Opus passes (ideate → author) via LiteLLM and
-renders via Gemini Live using the narrator voice from your STYLE.md
-Sound section (overridable with --voice and --style).
+renders via Gemini TTS. Narrator voice + behavioral clause + optional
+personality come in as --voice / --style / --personality flags; your
+agent skill (kindship-voice) extracts them from STYLE.md and passes
+them here. The CLI itself no longer parses STYLE.md.
 
 By default the WAV lands at ./narration/<slug>.wav relative to the
 current directory. Run from inside a video workspace (cd /workspace/
@@ -180,9 +185,10 @@ var voiceMultiCmd = &cobra.Command{
 runs two Opus passes (ideate → author) to produce a two-speaker
 dialogue, then renders via Gemini TTS multi-speaker mode.
 
-Both speaker voices come from your STYLE.md Sound section (Narrator +
-Companion) by default — pick them for deliberate contrast. Override
-with the --narrator-* and --companion-* flags.
+Narrator + companion voice / behavioral clause / optional personality
+arrive as --narrator-* / --companion-* flags. Your agent skill
+(create-podcast) extracts them from the STYLE.md Sound section and
+passes them here; the CLI no longer parses STYLE.md directly.
 
 Output lands at /workspace/documents/podcasts/<slug>.wav plus a
 sibling <slug>.meta.json with title + cold_open_note.`,
@@ -192,13 +198,17 @@ sibling <slug>.meta.json with title + cold_open_note.`,
 
 func init() {
 	voiceCmd.Flags().StringVar(&voiceSlug, "slug", "", "output slug (kebab-case 2-63 chars); default derived from narrative")
-	voiceCmd.Flags().StringVar(&voiceVoice, "voice", "", "Gemini voice ID; default from STYLE.md narrator entry")
-	voiceCmd.Flags().StringVar(&voiceStyle, "style", "", "behavioral clause e.g. \"gravelly, measured, older scholar\"")
+	voiceCmd.Flags().StringVar(&voiceVoice, "voice", "", "Gemini voice ID from the 30-voice roster (required)")
+	voiceCmd.Flags().StringVar(&voiceStyle, "style", "", "behavioral clause, e.g. \"gravelly, measured, older scholar\" (required)")
+	voiceCmd.Flags().StringVar(&voicePersonality, "personality", "", "optional personality paragraph fed to the Opus ideate/author passes")
+	voiceCmd.Flags().BoolVar(&voiceKeepDry, "keep-dry", false, "skip the Opus audio-tag injection pass (no [pause]/[breath] tags inserted)")
 	voiceCmd.Flags().IntVar(&voiceTargetMinutes, "target-minutes", 0, "finished audio target length (default server-chosen, ~3)")
 	voiceCmd.Flags().StringVar(&voiceOutput, "output", "", "destination path (default ./narration/<slug>.wav relative to cwd — run from inside a video dir)")
 	voiceCmd.Flags().StringVar(&voiceFormat, "format", "text", "success summary format: text (default) or json")
 	voiceCmd.Flags().BoolVar(&voiceNoTranscript, "no-transcript", false,
 		"skip writing the <slug>.transcript.txt sidecar next to the WAV")
+	_ = voiceCmd.MarkFlagRequired("voice")
+	_ = voiceCmd.MarkFlagRequired("style")
 
 	voiceExactCmd.Flags().StringVar(&voiceExactVoice, "voice", "", "Gemini voice ID (required)")
 	voiceExactCmd.Flags().StringVar(&voiceExactStyle, "style", "", "behavioral clause (required)")
@@ -210,14 +220,20 @@ func init() {
 	_ = voiceExactCmd.MarkFlagRequired("style")
 
 	voiceMultiCmd.Flags().StringVar(&voiceMultiSlug, "slug", "", "output slug (kebab-case 2-63 chars); default derived from narrative")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorVoice, "narrator-voice", "", "override STYLE.md narrator voice")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorStyle, "narrator-style", "", "override STYLE.md narrator behavioral clause")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorName, "narrator-name", "", "override narrator display name (default: \"Host\")")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionVoice, "companion-voice", "", "override STYLE.md companion voice")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionStyle, "companion-style", "", "override STYLE.md companion behavioral clause")
-	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionName, "companion-name", "", "override companion display name (default: \"Guest\")")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorVoice, "narrator-voice", "", "Gemini voice ID for the narrator (required)")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorStyle, "narrator-style", "", "narrator behavioral clause (required)")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorName, "narrator-name", "", "narrator display name (default: \"Host\")")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiNarratorPersonality, "narrator-personality", "", "optional narrator personality paragraph for the Opus passes")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionVoice, "companion-voice", "", "Gemini voice ID for the companion (required)")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionStyle, "companion-style", "", "companion behavioral clause (required)")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionName, "companion-name", "", "companion display name (default: \"Guest\")")
+	voiceMultiCmd.Flags().StringVar(&voiceMultiCompanionPersonality, "companion-personality", "", "optional companion personality paragraph for the Opus passes")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiTargetLength, "target-length", "", "target episode length e.g. \"6-8 minutes\" (default \"5-7 minutes\")")
 	voiceMultiCmd.Flags().StringVar(&voiceMultiOutput, "output", "", "destination path (default /workspace/documents/podcasts/<slug>.wav)")
+	_ = voiceMultiCmd.MarkFlagRequired("narrator-voice")
+	_ = voiceMultiCmd.MarkFlagRequired("narrator-style")
+	_ = voiceMultiCmd.MarkFlagRequired("companion-voice")
+	_ = voiceMultiCmd.MarkFlagRequired("companion-style")
 
 	voiceUnderstandCmd.Flags().StringVar(&voiceUnderstandPrompt, "prompt", "",
 		"inline prompt for Gemini; mutually exclusive with --prompt-file")
@@ -304,19 +320,9 @@ func fetchVoiceSecrets(
 	return out, nil
 }
 
-// loadAgentSound reads the agent's STYLE.md from the container
-// filesystem and parses the Sound section. Returns an empty
-// StyleSound (both fields nil) if the file doesn't exist or can't be
-// parsed — callers require CLI overrides in that case.
-func loadAgentSound() voice.StyleSound {
-	raw, err := os.ReadFile(voiceStyleMdPath)
-	if err != nil {
-		return voice.StyleSound{}
-	}
-	return voice.ParseStyleMdSound(string(raw))
-}
-
 // validateSlug lives in cmd/video.go — shared across commands.
+// STYLE.md parsing now lives in the skills (kindship-voice, create-podcast);
+// the CLI takes voice + behavioral clause + personality as explicit flags.
 
 // callOpus runs one streaming Anthropic request against LiteLLM with
 // thinking enabled + the model/max_tokens the voice pipeline uses.
@@ -394,23 +400,15 @@ func runVoiceGenerate(cmd *cobra.Command, args []string) error {
 		outputPath = filepath.Join(voiceDefaultMonoSubdir, slug+".wav")
 	}
 
-	// Resolve the narrator profile — CLI flags win; otherwise STYLE.md.
-	sound := loadAgentSound()
+	// Resolve the narrator profile from CLI flags. STYLE.md extraction
+	// now lives in the kindship-voice skill — the CLI is purely a
+	// parameter-driven renderer.
 	narratorVoice := voiceVoice
 	narratorStyle := voiceStyle
-	var narratorPersonality string
-	if narratorVoice == "" && sound.Narrator != nil {
-		narratorVoice = sound.Narrator.Voice
-	}
-	if narratorStyle == "" && sound.Narrator != nil {
-		narratorStyle = sound.Narrator.BehavioralClause
-	}
-	if sound.Narrator != nil {
-		narratorPersonality = sound.Narrator.Personality
-	}
+	narratorPersonality := voicePersonality
 	if narratorVoice == "" || narratorStyle == "" {
 		return fmt.Errorf(
-			"narrator voice + behavioral clause required — either fill STYLE.md Sound section or pass --voice and --style",
+			"--voice and --style are required. Extract them from the Narrator voice bullet in your STYLE.md Sound section and pass as flags; see the kindship-voice skill for the extraction recipe.",
 		)
 	}
 	if !voice.IsValidGeminiVoice(narratorVoice) {
@@ -719,18 +717,16 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 		outputPath = filepath.Join(voiceDefaultPodDir, slug+".wav")
 	}
 
-	// Resolve narrator + companion. CLI flag overrides beat STYLE.md.
-	sound := loadAgentSound()
+	// Resolve narrator + companion from CLI flags. STYLE.md extraction
+	// now lives in the create-podcast skill.
 	narrator, err := resolvePodcastSpeaker(
-		"narrator", voiceMultiNarratorVoice, voiceMultiNarratorStyle, voiceMultiNarratorName,
-		sound.Narrator, "Host",
+		"narrator", voiceMultiNarratorVoice, voiceMultiNarratorStyle, voiceMultiNarratorName, voiceMultiNarratorPersonality, "Host",
 	)
 	if err != nil {
 		return err
 	}
 	companion, err := resolvePodcastSpeaker(
-		"companion", voiceMultiCompanionVoice, voiceMultiCompanionStyle, voiceMultiCompanionName,
-		sound.Companion, "Guest",
+		"companion", voiceMultiCompanionVoice, voiceMultiCompanionStyle, voiceMultiCompanionName, voiceMultiCompanionPersonality, "Guest",
 	)
 	if err != nil {
 		return err
@@ -839,46 +835,42 @@ func runVoiceMulti(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// resolvePodcastSpeaker merges CLI flag overrides with the STYLE.md
-// entry and returns a fully populated SpeakerProfile, or an actionable
-// error if key fields are missing.
+// resolvePodcastSpeaker builds a SpeakerProfile from CLI flag values.
+// STYLE.md extraction is a concern of the create-podcast skill; this
+// function is purely a validator + default-filler.
 func resolvePodcastSpeaker(
-	role, flagVoice, flagStyle, flagName string,
-	styleEntry *voice.StyleVoice,
-	defaultName string,
+	role, flagVoice, flagStyle, flagName, flagPersonality, defaultName string,
 ) (voice.SpeakerProfile, error) {
-	voiceID := flagVoice
-	clause := flagStyle
-	name := flagName
-	personality := ""
-	if styleEntry != nil {
-		if voiceID == "" {
-			voiceID = styleEntry.Voice
-		}
-		if clause == "" {
-			clause = styleEntry.BehavioralClause
-		}
-		personality = styleEntry.Personality
-	}
-	if voiceID == "" || clause == "" {
+	if flagVoice == "" || flagStyle == "" {
 		return voice.SpeakerProfile{}, fmt.Errorf(
-			"%s voice + behavioral clause required — either fill STYLE.md Sound section or pass --%s-voice / --%s-style",
-			role, role, role,
+			"--%s-voice and --%s-style are required. Extract them from the %s bullet in your STYLE.md Sound section and pass as flags; see the create-podcast skill for the extraction recipe.",
+			role, role, capitalize(role),
 		)
 	}
-	if !voice.IsValidGeminiVoice(voiceID) {
-		return voice.SpeakerProfile{}, fmt.Errorf("%s voice %q is not in the Gemini roster", role, voiceID)
+	if !voice.IsValidGeminiVoice(flagVoice) {
+		return voice.SpeakerProfile{}, fmt.Errorf("%s voice %q is not in the Gemini roster", role, flagVoice)
 	}
+	name := flagName
 	if name == "" {
 		name = defaultName
 	}
 	return voice.SpeakerProfile{
 		Name:             name,
 		Role:             role,
-		VoiceID:          voiceID,
-		BehavioralClause: clause,
-		Personality:      personality,
+		VoiceID:          flagVoice,
+		BehavioralClause: flagStyle,
+		Personality:      flagPersonality,
 	}, nil
+}
+
+// capitalize is a local tiny helper — used only for error message
+// pretty-printing ("narrator" → "Narrator"). strings.Title is deprecated
+// and golang.org/x/text/cases would be overkill for this single use.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // runVoiceUnderstand wires `kindship voice understanding <audio>` to

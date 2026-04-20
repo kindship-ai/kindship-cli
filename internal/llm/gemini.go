@@ -252,6 +252,123 @@ type Speaker struct {
 	VoiceName string
 }
 
+// SingleSpeakerTTS renders `text` with a single prebuilt voice via the
+// REST TTS endpoint (same `:generateContent` path as MultiSpeakerTTS, but
+// with `voiceConfig` instead of `multiSpeakerVoiceConfig`). Returns raw
+// 16-bit mono PCM at 24kHz.
+//
+// `text` is sent verbatim — the caller owns any load-bearing prefix such
+// as `[Zubenelgenubi, ancient old man with slight Egyptian accent, …]`
+// and any inline audio tags (`[pause]`, `[breath]`) produced by the
+// upstream Opus tag pass. This mirrors the convention used by
+// RenderExactPrompt / RenderMonologueGeminiPrompt.
+//
+// Used by `kindship voice` (monologue) after the plan swap from the Live
+// WS API — the TTS REST path renders consistently higher-quality audio
+// for non-realtime voice-over use (Google's own recommendation for
+// podcast / audiobook-style output).
+func SingleSpeakerTTS(
+	ctx context.Context,
+	apiKey, voiceName, text string,
+) ([]byte, error) {
+	if apiKey == "" {
+		return nil, fmt.Errorf("SingleSpeakerTTS: apiKey is empty")
+	}
+	if voiceName == "" {
+		return nil, fmt.Errorf("SingleSpeakerTTS: voiceName is empty")
+	}
+	if text == "" {
+		return nil, fmt.Errorf("SingleSpeakerTTS: text is empty")
+	}
+
+	body := map[string]any{
+		"contents": []any{map[string]any{
+			"parts": []any{map[string]any{"text": text}},
+		}},
+		"generationConfig": map[string]any{
+			"responseModalities": []string{"AUDIO"},
+			"speechConfig": map[string]any{
+				"voiceConfig": map[string]any{
+					"prebuiltVoiceConfig": map[string]any{
+						"voiceName": voiceName,
+					},
+				},
+			},
+		},
+	}
+
+	endpoint := fmt.Sprintf(
+		"%s/v1beta/models/%s:generateContent?key=%s",
+		geminiRESTBaseURL(),
+		url.PathEscape(ttsModel()),
+		url.QueryEscape(apiKey),
+	)
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 3 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", strings.TrimSuffix(endpoint, "?key="+url.QueryEscape(apiKey)), err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		p := string(respBody)
+		if len(p) > 400 {
+			p = p[:400]
+		}
+		return nil, fmt.Errorf("gemini TTS %d: %s", resp.StatusCode, p)
+	}
+
+	var parsed struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					InlineData *struct {
+						MimeType string `json:"mimeType"`
+						Data     string `json:"data"`
+					} `json:"inlineData"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	var audio []byte
+	for _, cand := range parsed.Candidates {
+		for _, part := range cand.Content.Parts {
+			if part.InlineData == nil || part.InlineData.Data == "" {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(part.InlineData.Data)
+			if err != nil {
+				return nil, fmt.Errorf("decode audio data: %w", err)
+			}
+			audio = append(audio, raw...)
+		}
+	}
+	if len(audio) == 0 {
+		return nil, fmt.Errorf("gemini TTS returned no audio: %s", preview(string(respBody)))
+	}
+	return audio, nil
+}
+
 // MultiSpeakerTTS renders a two-voice dialog via the REST TTS endpoint.
 // `text` must use "<Speaker>: <line>" lines matching `speakers[].Speaker`.
 // Returns raw PCM bytes at 24kHz mono.
