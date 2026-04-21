@@ -38,20 +38,25 @@ func ChunkTargetSeconds() int {
 	return DefaultChunkTargetSeconds
 }
 
-// ChunkDialogue partitions `lines` into sub-slices where the cumulative
-// estimated spoken audio of each chunk is close to (but not exceeding)
-// targetSeconds. Boundaries ALWAYS fall on turn boundaries — a line is
-// never split across chunks. Preserves line order.
+// ChunkDialogue partitions `lines` into equal-length turn-aligned
+// sub-slices. Two-pass algorithm:
 //
-// A single line longer than targetSeconds goes into its own chunk,
-// even though that chunk will overshoot the target. This is fine — the
-// alternative (splitting a turn) would break speaker continuity and
-// reopen the drift problem we're chunking to solve.
+//  1. Determine chunk count N via greedy fill against targetSeconds as
+//     a ceiling (the original behavior).
+//  2. If N > 1, re-partition greedily against totalSeconds/N as the
+//     target — every chunk lands close to 1/N of the episode, which
+//     eliminates tiny tail chunks (where Gemini 3.1 Flash TTS multi-
+//     speaker loses voice-identity conditioning and can collapse both
+//     roles onto one voice profile — observed on Ripple's v2 run,
+//     2026-04-21, last chunk 51s/10 lines rendered with a single voice).
 //
-// Returns an empty slice when `lines` is empty. When targetSeconds is
-// <= 0, returns a single chunk containing all lines (no chunking). Used
-// by cmd.runVoiceMulti to drive the chunked MultiSpeakerTTS render
-// loop added by the 2026-04 voice-quality plan.
+// Boundaries ALWAYS fall on turn boundaries — a line is never split
+// across chunks. Preserves line order. A single line longer than the
+// target lands alone in its own chunk (oversized-line invariant).
+//
+// Returns nil when `lines` is empty. When targetSeconds <= 0, returns
+// a single chunk containing all lines (no chunking). Used by
+// cmd.runVoiceMulti to drive the chunked MultiSpeakerTTS render loop.
 func ChunkDialogue(lines []PodcastLine, targetSeconds int) [][]PodcastLine {
 	if len(lines) == 0 {
 		return nil
@@ -62,6 +67,25 @@ func ChunkDialogue(lines []PodcastLine, targetSeconds int) [][]PodcastLine {
 		return [][]PodcastLine{out}
 	}
 
+	// Pass 1: ceiling-based greedy chunking to determine N.
+	first := greedyChunk(lines, float64(targetSeconds))
+	if len(first) <= 1 {
+		return first
+	}
+
+	// Pass 2: equal-length greedy chunking with target = total/N.
+	total := 0.0
+	for _, line := range lines {
+		total += EstimateLineSeconds(line)
+	}
+	equalTarget := total / float64(len(first))
+	return greedyChunk(lines, equalTarget)
+}
+
+// greedyChunk is the turn-aligned partitioner used by both passes of
+// ChunkDialogue. Accepts a float target so the equal-length pass can
+// use fractional seconds without precision loss.
+func greedyChunk(lines []PodcastLine, target float64) [][]PodcastLine {
 	chunks := [][]PodcastLine{{}}
 	currentSeconds := 0.0
 	cursor := 0
@@ -69,9 +93,10 @@ func ChunkDialogue(lines []PodcastLine, targetSeconds int) [][]PodcastLine {
 	for _, line := range lines {
 		lineSeconds := EstimateLineSeconds(line)
 		// If adding this line would overshoot AND the current chunk
-		// already has at least one line, close the current chunk and
-		// start a new one. Single oversized lines still land alone.
-		if currentSeconds > 0 && currentSeconds+lineSeconds > float64(targetSeconds) {
+		// already has at least one line, close and start a new one.
+		// Single oversized lines still land alone (overshooting is the
+		// lesser evil vs splitting a turn).
+		if currentSeconds > 0 && currentSeconds+lineSeconds > target {
 			cursor++
 			chunks = append(chunks, []PodcastLine{})
 			currentSeconds = 0

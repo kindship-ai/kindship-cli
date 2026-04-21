@@ -105,6 +105,50 @@ func TestEstimateLineSeconds_BackchannelFloor(t *testing.T) {
 	}
 }
 
+func TestChunkDialogue_EqualLengthRebalancing(t *testing.T) {
+	// Simulate a script where greedy-fill at target 100s would produce
+	// one tiny tail chunk. With equal-length rebalancing, the tail
+	// should be ~1/N of the total rather than whatever's left over.
+	//
+	// 14 turns × 30 words each = 420 words ≈ 168s at 150 wpm.
+	// Pass 1 at target=100: fills 3 chunks of ~100s until the content
+	// runs out → last chunk much smaller. Pass 2 with target=168/N
+	// lands N chunks of ~equal length.
+	thirtyWords := strings.TrimSpace(strings.Repeat("word ", 30))
+	in := make([]PodcastLine, 14)
+	for i := range in {
+		in[i] = PodcastLine{Speaker: []string{"A", "B"}[i%2], Text: thirtyWords}
+	}
+
+	got := ChunkDialogue(in, 100)
+	if len(got) < 2 {
+		t.Fatalf("expected >= 2 chunks; got %d", len(got))
+	}
+
+	// Measure per-chunk estimated duration.
+	durations := make([]float64, len(got))
+	for i, chunk := range got {
+		for _, line := range chunk {
+			durations[i] += EstimateLineSeconds(line)
+		}
+	}
+	minDur, maxDur := durations[0], durations[0]
+	for _, d := range durations {
+		if d < minDur {
+			minDur = d
+		}
+		if d > maxDur {
+			maxDur = d
+		}
+	}
+	// Equal-length rebalancing should keep max:min ratio close to 1.
+	// Without rebalancing, a tail chunk could be 20% of the target
+	// while others are at target — ratio ≥ 5.
+	if maxDur/minDur > 1.5 {
+		t.Errorf("equal-length rebalancing failed: max/min=%.2f (durations=%v)", maxDur/minDur, durations)
+	}
+}
+
 func TestEstimateLineSeconds_150wpm(t *testing.T) {
 	// 150 words → 60 seconds at 150 wpm exactly.
 	text := strings.TrimSpace(strings.Repeat("word ", 150))
