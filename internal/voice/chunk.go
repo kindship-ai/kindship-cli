@@ -73,18 +73,29 @@ func ChunkDialogue(lines []PodcastLine, targetSeconds int) [][]PodcastLine {
 		return first
 	}
 
-	// Pass 2: equal-length greedy chunking with target = total/N.
+	// Pass 2: threshold-based equal-length chunking. Threshold is
+	// superior to greedy-forward with target=total/N for balancing
+	// chunk sizes because greedy accumulates slack in the tail (each
+	// chunk under-fills by up to one turn's length, and those underfills
+	// sum into a tiny last chunk — observed on Ripple v3 as a 47s
+	// tail amid 65-84s peers, even after the equal-target pass).
+	//
+	// Threshold approach: compute N-1 cumulative boundary targets at
+	// k*(total/N) for k=1..N-1. Walk the lines accumulating; close the
+	// current chunk as soon as cumulative ≥ next boundary. The final
+	// chunk naturally gets its share (~total/N) because previous
+	// boundaries don't steal from it.
 	total := 0.0
 	for _, line := range lines {
 		total += EstimateLineSeconds(line)
 	}
-	equalTarget := total / float64(len(first))
-	return greedyChunk(lines, equalTarget)
+	return thresholdChunk(lines, total, len(first))
 }
 
-// greedyChunk is the turn-aligned partitioner used by both passes of
-// ChunkDialogue. Accepts a float target so the equal-length pass can
-// use fractional seconds without precision loss.
+// greedyChunk is a turn-aligned forward-fill partitioner: fills each
+// chunk to ≤ target seconds, starts a new chunk when adding the next
+// line would overshoot. Used for ChunkDialogue's pass-1 (count chunks).
+// Single oversized lines land alone (overshoot > split-turn).
 func greedyChunk(lines []PodcastLine, target float64) [][]PodcastLine {
 	chunks := [][]PodcastLine{{}}
 	currentSeconds := 0.0
@@ -92,10 +103,6 @@ func greedyChunk(lines []PodcastLine, target float64) [][]PodcastLine {
 
 	for _, line := range lines {
 		lineSeconds := EstimateLineSeconds(line)
-		// If adding this line would overshoot AND the current chunk
-		// already has at least one line, close and start a new one.
-		// Single oversized lines still land alone (overshooting is the
-		// lesser evil vs splitting a turn).
 		if currentSeconds > 0 && currentSeconds+lineSeconds > target {
 			cursor++
 			chunks = append(chunks, []PodcastLine{})
@@ -103,6 +110,55 @@ func greedyChunk(lines []PodcastLine, target float64) [][]PodcastLine {
 		}
 		chunks[cursor] = append(chunks[cursor], line)
 		currentSeconds += lineSeconds
+	}
+	return chunks
+}
+
+// thresholdChunk partitions `lines` into up to `n` turn-aligned
+// chunks of approximately total/n seconds each. Closes the current
+// chunk as soon as cumulative time crosses the next k*total/n boundary.
+// Distribution is tight: each chunk's size lies within ±max-turn-length
+// of total/n, and the last chunk gets its natural share.
+//
+// Oversized-line invariant preserved: if a line's own estimate exceeds
+// the per-chunk target, any content accumulated in the current chunk
+// is flushed before the oversized line, so the oversized line lands
+// alone in its own chunk (matching greedyChunk's behavior).
+//
+// May produce fewer than n chunks when one or more oversized lines
+// consume disproportionate budget — this is acceptable (strictly
+// better than starvation). Assumes n ≥ 1 and total > 0.
+func thresholdChunk(lines []PodcastLine, total float64, n int) [][]PodcastLine {
+	if n <= 1 {
+		out := make([]PodcastLine, len(lines))
+		copy(out, lines)
+		return [][]PodcastLine{out}
+	}
+	target := total / float64(n)
+	chunks := make([][]PodcastLine, 0, n)
+	current := []PodcastLine{}
+	cumulative := 0.0
+
+	for _, line := range lines {
+		lineSeconds := EstimateLineSeconds(line)
+		// Oversized line arriving mid-chunk: flush current first so the
+		// oversized line lands alone.
+		if lineSeconds > target && len(current) > 0 {
+			chunks = append(chunks, current)
+			current = nil
+		}
+		current = append(current, line)
+		cumulative += lineSeconds
+		// Close current if cumulative crossed the next k*target boundary
+		// AND we haven't already emitted n-1 chunks (final chunk gets
+		// whatever remains).
+		if len(chunks) < n-1 && cumulative >= float64(len(chunks)+1)*target {
+			chunks = append(chunks, current)
+			current = nil
+		}
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
 	}
 	return chunks
 }

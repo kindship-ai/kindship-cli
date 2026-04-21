@@ -149,6 +149,51 @@ func TestChunkDialogue_EqualLengthRebalancing(t *testing.T) {
 	}
 }
 
+func TestChunkDialogue_ThresholdEliminatesTailStarvation(t *testing.T) {
+	// Reproduces the Ripple v3 pattern (2026-04-21): with greedy-
+	// forward partitioning, slack accumulates and dumps into the tail.
+	// With 60 ~13s turns (avg-size realistic-ish podcast lines) at
+	// target 100s, greedy-forward pass-2 produced an 8th chunk ~47s
+	// while peer chunks were 65-84s. Threshold pass-2 eliminates this.
+	//
+	// 60 turns × 17 words ≈ 60 × 6.8s = 408s. At target 100s, pass-1
+	// greedy produces ~4-5 chunks; pass-2 threshold produces same N
+	// but tightly balanced.
+	in := make([]PodcastLine, 60)
+	for i := range in {
+		in[i] = PodcastLine{
+			Speaker: []string{"A", "B"}[i%2],
+			Text:    strings.Repeat("word ", 17),
+		}
+	}
+	got := ChunkDialogue(in, 100)
+	if len(got) < 3 {
+		t.Fatalf("expected >=3 chunks; got %d", len(got))
+	}
+
+	durs := make([]float64, len(got))
+	for i, c := range got {
+		for _, l := range c {
+			durs[i] += EstimateLineSeconds(l)
+		}
+	}
+	min, max := durs[0], durs[0]
+	for _, d := range durs {
+		if d < min {
+			min = d
+		}
+		if d > max {
+			max = d
+		}
+	}
+	// Threshold partitioning should keep max/min under ~1.25 on this
+	// even distribution. Greedy-forward on the same input produces
+	// max/min ≈ 1.78 (Ripple v3: 84.0 / 47.2).
+	if max/min > 1.25 {
+		t.Errorf("threshold should yield tight distribution; got max/min=%.2f: %v", max/min, durs)
+	}
+}
+
 func TestEstimateLineSeconds_150wpm(t *testing.T) {
 	// 150 words → 60 seconds at 150 wpm exactly.
 	text := strings.TrimSpace(strings.Repeat("word ", 150))
