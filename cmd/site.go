@@ -1010,82 +1010,59 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no files to push in %s", dir)
 	}
 
-	// Build multipart request
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
+	// Buffer the archive once. Both --dry-run (legacy multipart) and
+	// the new two-step push flow (init → PUT → finalize) need to read
+	// the same bytes; archiveBuf is a *bytes.Buffer that can only be
+	// drained once, so we materialize the bytes here.
+	archiveBytes := archiveBuf.Bytes()
+	partial := len(pushOnly) > 0
 
-	_ = writer.WriteField("site_name", siteName)
-	_ = writer.WriteField("agent_id", agentID)
-	_ = writer.WriteField("message", pushMessage)
-	if len(pushOnly) > 0 {
-		_ = writer.WriteField("partial", "true")
-	}
-
-	part, err := writer.CreateFormFile("archive", "archive.tar.gz")
-	if err != nil {
-		return fmt.Errorf("failed to create form file: %w", err)
-	}
-	if _, err := io.Copy(part, archiveBuf); err != nil {
-		return fmt.Errorf("failed to write archive to form: %w", err)
-	}
-	writer.Close()
-
-	endpoint := fmt.Sprintf("%s/api/cli/site/push", ctx.APIBaseURL)
+	// --dry-run still uses the legacy multipart endpoint. Dry-runs
+	// inspect the archive contents server-side without touching Gitea
+	// or storage, so the path doesn't need the signed-URL flow.
 	if pushDryRun {
-		endpoint = fmt.Sprintf("%s/api/cli/site/push/dry-run", ctx.APIBaseURL)
-	}
-	req, err := http.NewRequest(http.MethodPost, endpoint, &requestBody)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	ctx.SetAuthHeaders(req)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-Kindship-CLI-Version", Version)
-
-	client := &http.Client{Timeout: 300 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to push files: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
-		return fmt.Errorf("push failed: %w", err)
-	}
-
-	if pushDryRun {
-		var dryResp api.SitePushDryRunResponse
-		if err := json.Unmarshal(body, &dryResp); err != nil {
-			return fmt.Errorf("failed to parse dry-run response: %w", err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			if dryResp.Error != "" {
-				return fmt.Errorf("dry-run failed: %s", dryResp.Error)
-			}
-			return fmt.Errorf("dry-run failed (%d): %s", resp.StatusCode, string(body))
+		dryResp, err := postSitePushDryRun(ctx, dryRunArgs{
+			siteName:     siteName,
+			agentID:      agentID,
+			message:      pushMessage,
+			partial:      partial,
+			archiveBytes: archiveBytes,
+		})
+		if err != nil {
+			return err
 		}
 		if siteFormat == "json" {
 			return printJSON(dryResp)
 		}
-		return renderDryRun(dryResp, dir)
+		return renderDryRun(*dryResp, dir)
 	}
 
-	var pushResp api.SitePushResponse
-	if err := json.Unmarshal(body, &pushResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	// Two-step push: ask the server for a signed upload URL, PUT the
+	// tarball directly to Supabase Storage (bypasses Vercel's 4.5MB
+	// function body cap), then finalize so the server can dispatch
+	// the Hatchet workflow against the staged archive.
+	initResp, err := postSitePushInit(ctx, api.SitePushInitRequest{
+		SiteName:    siteName,
+		AgentID:     agentID,
+		ArchiveSize: int64(len(archiveBytes)),
+	})
+	if err != nil {
+		return err
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		if pushResp.Error != "" {
-			return fmt.Errorf("push failed: %s", pushResp.Error)
-		}
-		return fmt.Errorf("push failed (%d): %s", resp.StatusCode, string(body))
+	if err := putSiteArchiveToSignedURL(initResp.UploadURL, archiveBytes); err != nil {
+		return fmt.Errorf("failed to upload archive: %w", err)
+	}
+
+	pushResp, err := postSitePushFinalize(ctx, api.SitePushFinalizeRequest{
+		SiteName:    siteName,
+		AgentID:     agentID,
+		StagingPath: initResp.StagingPath,
+		Message:     pushMessage,
+		Partial:     partial,
+	})
+	if err != nil {
+		return err
 	}
 
 	pushResp.SourceDir = dir
@@ -1905,4 +1882,207 @@ func formatDuration(d time.Duration) string {
 		return "1 day ago"
 	}
 	return fmt.Sprintf("%d days ago", days)
+}
+
+// ─── Two-step push helpers ──────────────────────────────────────
+
+// postSitePushInit asks the server for a signed upload URL the CLI
+// can PUT the tarball against. Mirrors video publish-init.
+func postSitePushInit(
+	ctx *auth.Context, body api.SitePushInitRequest,
+) (*api.SitePushInitResponse, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal init request: %w", err)
+	}
+	httpReq, err := http.NewRequest(
+		http.MethodPost,
+		ctx.APIBaseURL+"/api/cli/site/push/init",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build init request: %w", err)
+	}
+	ctx.SetAuthHeaders(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("POST site push init: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read init response: %w", err)
+	}
+	if err := handleNonJSONResponse(resp.StatusCode, respBody); err != nil {
+		return nil, err
+	}
+	var out api.SitePushInitResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, fmt.Errorf("parse init response: %w: %s", err, firstBytes(respBody, 300))
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, fmt.Errorf("push init %d: %s", resp.StatusCode, out.Error)
+		}
+		return nil, fmt.Errorf("push init %d: %s", resp.StatusCode, firstBytes(respBody, 300))
+	}
+	if out.UploadURL == "" || out.StagingPath == "" {
+		return nil, fmt.Errorf("init response missing required fields: %s", firstBytes(respBody, 300))
+	}
+	return &out, nil
+}
+
+// putSiteArchiveToSignedURL PUTs the tarball body to the presigned
+// URL returned by /init. Supabase signed upload URLs accept the body
+// directly with Content-Type signalling; no extra headers needed.
+//
+// Generous timeout: bucket caps at 50MB, uploads over typical
+// container egress (~25 Mbit/s) take ~16s at the cap. 5 minutes is
+// pathological headroom so a throttled network won't time out before
+// the upload completes.
+func putSiteArchiveToSignedURL(uploadURL string, body []byte) error {
+	req, err := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build PUT: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	req.ContentLength = int64(len(body))
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("PUT: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT %d: %s", resp.StatusCode, firstBytes(raw, 300))
+	}
+	return nil
+}
+
+// postSitePushFinalize tells the server the tarball is staged and
+// ready to be extracted + committed.
+func postSitePushFinalize(
+	ctx *auth.Context, body api.SitePushFinalizeRequest,
+) (*api.SitePushResponse, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal finalize request: %w", err)
+	}
+	httpReq, err := http.NewRequest(
+		http.MethodPost,
+		ctx.APIBaseURL+"/api/cli/site/push/finalize",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build finalize request: %w", err)
+	}
+	ctx.SetAuthHeaders(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("X-Kindship-CLI-Version", Version)
+
+	// Finalize waits on the Hatchet workflow; the server budgets ~4.5
+	// minutes internally before timing out. Our client timeout is a
+	// touch longer so we see the server's 424 instead of a connection
+	// reset.
+	client := &http.Client{Timeout: 6 * time.Minute}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("POST site push finalize: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read finalize response: %w", err)
+	}
+	if err := handleNonJSONResponse(resp.StatusCode, respBody); err != nil {
+		return nil, err
+	}
+	var out api.SitePushResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, fmt.Errorf("parse finalize response: %w: %s", err, firstBytes(respBody, 300))
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, fmt.Errorf("push failed: %s", out.Error)
+		}
+		return nil, fmt.Errorf("push failed (%d): %s", resp.StatusCode, firstBytes(respBody, 300))
+	}
+	return &out, nil
+}
+
+// dryRunArgs bundles the inputs to the legacy dry-run multipart endpoint.
+type dryRunArgs struct {
+	siteName     string
+	agentID      string
+	message      string
+	partial      bool
+	archiveBytes []byte
+}
+
+// postSitePushDryRun keeps the legacy multipart call for --dry-run.
+// Dry-run inspects the archive without touching Gitea/storage, so it
+// doesn't need the new signed-URL flow.
+func postSitePushDryRun(
+	ctx *auth.Context, args dryRunArgs,
+) (*api.SitePushDryRunResponse, error) {
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	_ = writer.WriteField("site_name", args.siteName)
+	_ = writer.WriteField("agent_id", args.agentID)
+	_ = writer.WriteField("message", args.message)
+	if args.partial {
+		_ = writer.WriteField("partial", "true")
+	}
+	part, err := writer.CreateFormFile("archive", "archive.tar.gz")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := part.Write(args.archiveBytes); err != nil {
+		return nil, fmt.Errorf("failed to write archive to form: %w", err)
+	}
+	writer.Close()
+
+	endpoint := fmt.Sprintf("%s/api/cli/site/push/dry-run", ctx.APIBaseURL)
+	req, err := http.NewRequest(http.MethodPost, endpoint, &requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 300 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to push files: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if err := handleNonJSONResponse(resp.StatusCode, respBody); err != nil {
+		return nil, fmt.Errorf("dry-run failed: %w", err)
+	}
+
+	var dryResp api.SitePushDryRunResponse
+	if err := json.Unmarshal(respBody, &dryResp); err != nil {
+		return nil, fmt.Errorf("failed to parse dry-run response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if dryResp.Error != "" {
+			return nil, fmt.Errorf("dry-run failed: %s", dryResp.Error)
+		}
+		return nil, fmt.Errorf("dry-run failed (%d): %s", resp.StatusCode, firstBytes(respBody, 300))
+	}
+	return &dryResp, nil
 }

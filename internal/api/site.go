@@ -52,7 +52,10 @@ type SiteStatusResponse struct {
 	Error string     `json:"error,omitempty"`
 }
 
-// SitePushResponse is the response from POST /api/cli/site/push
+// SitePushResponse is the response from POST /api/cli/site/push (legacy
+// multipart endpoint) and from /api/cli/site/push/finalize (the second
+// step of the new two-step flow). Both share the same success shape so
+// callers can render either path identically.
 type SitePushResponse struct {
 	CommitSha       string   `json:"commit_sha"`
 	FilesPushed     int      `json:"files_pushed"`
@@ -61,6 +64,35 @@ type SitePushResponse struct {
 	SkippedReserved []string `json:"skipped_reserved"`
 	SkippedDenied   []string `json:"skipped_denied"`
 	Error           string   `json:"error,omitempty"`
+}
+
+// SitePushInitRequest is the request body for POST /api/cli/site/push/init.
+// archive_size lets the server reject pushes above the staging bucket cap
+// before the CLI wastes an upload.
+type SitePushInitRequest struct {
+	SiteName    string `json:"site_name"`
+	AgentID     string `json:"agent_id,omitempty"`
+	ArchiveSize int64  `json:"archive_size"`
+}
+
+// SitePushInitResponse is the response from POST /api/cli/site/push/init.
+// upload_url is a short-lived Supabase Storage signed PUT URL; the CLI
+// uploads the tar.gz directly to it (no Vercel function body cap).
+type SitePushInitResponse struct {
+	StagingPath string `json:"staging_path"`
+	UploadURL   string `json:"upload_url"`
+	UploadToken string `json:"upload_token"`
+	Error       string `json:"error,omitempty"`
+}
+
+// SitePushFinalizeRequest is the request body for POST /api/cli/site/push/finalize.
+// staging_path must match the path returned from /init for the same site.
+type SitePushFinalizeRequest struct {
+	SiteName    string `json:"site_name"`
+	AgentID     string `json:"agent_id,omitempty"`
+	StagingPath string `json:"staging_path"`
+	Message     string `json:"message,omitempty"`
+	Partial     bool   `json:"partial,omitempty"`
 }
 
 // SitePushDryRunChange describes a single file that would change in a push.
