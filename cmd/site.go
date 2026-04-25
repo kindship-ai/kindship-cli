@@ -211,12 +211,14 @@ Examples:
 }
 
 var (
-	siteFormat  string
-	pushDir     string
-	pushMessage string
-	pushOnly    []string
-	pushDryRun  bool
-	logsBuild   int
+	siteFormat      string
+	pushDir         string
+	pushMessage     string
+	pushOnly        []string
+	pushDryRun      bool
+	pushWait        bool
+	pushWaitTimeout int
+	logsBuild       int
 )
 
 const containerSiteWorkspaceRoot = "/workspace/sites"
@@ -233,6 +235,8 @@ func init() {
 	sitePushCmd.Flags().StringVar(&pushMessage, "message", "Deploy from agent", "Commit message")
 	sitePushCmd.Flags().StringArrayVar(&pushOnly, "only", nil, "Clone HEAD into a temp dir, overlay only the matching file(s) from the worktree, and push the overlay. Repeatable. Requires at least one commit on the site repo.")
 	sitePushCmd.Flags().BoolVar(&pushDryRun, "dry-run", false, "Inspect the archive and report what would change without triggering a build. Returns changed files and affected routes.")
+	sitePushCmd.Flags().BoolVar(&pushWait, "wait", false, "Block after dispatch until the triggered build reaches a terminal state (success/failure). Polls site status every 3s and exits non-zero on build failure.")
+	sitePushCmd.Flags().IntVar(&pushWaitTimeout, "wait-timeout", 300, "Max seconds to wait for build completion when --wait is set. Default 300.")
 
 	siteLogsCmd.Flags().IntVar(&logsBuild, "build", 0, "Build number (default: latest)")
 
@@ -1085,7 +1089,109 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Skipped denied: %s\n", strings.Join(pushResp.SkippedDenied, ", "))
 	}
 
+	if pushWait {
+		return waitForBuildCompletion(ctx, siteName, agentID, pushResp.CommitSha, pushWaitTimeout)
+	}
+
 	return nil
+}
+
+// waitForBuildCompletion polls /api/cli/site/status until the build whose
+// `commit` matches the just-pushed commit reaches a terminal state, or until
+// the timeout elapses. Returns nil on build success, an error on build failure
+// or timeout.
+//
+// Terminal indicator: build.finished_at > 0. Build status values from
+// Woodpecker that count as success: "success". Anything else with finished_at
+// set is a failure (failure, killed, declined, error).
+func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha string, timeoutSec int) error {
+	const pollInterval = 3 * time.Second
+	const progressEvery = 4 // print one waiting line every ~12s
+
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	endpoint := fmt.Sprintf("%s/api/cli/site/status?site_name=%s&agent_id=%s", ctx.APIBaseURL, siteName, agentID)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	fmt.Printf("  Waiting for build (timeout %ds)...\n", timeoutSec)
+
+	pollCount := 0
+	var lastBuildNumber int
+	var lastBuildStatus string
+
+	for time.Now().Before(deadline) {
+		time.Sleep(pollInterval)
+		pollCount++
+
+		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create status request: %w", err)
+		}
+		ctx.SetAuthHeaders(req)
+		req.Header.Set("X-Kindship-CLI-Version", Version)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			// Transient network errors during polling: keep going until deadline.
+			if pollCount%progressEvery == 0 {
+				fmt.Printf("  ...status poll error: %v (will retry)\n", err)
+			}
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			if pollCount%progressEvery == 0 {
+				fmt.Printf("  ...status %d (will retry)\n", resp.StatusCode)
+			}
+			continue
+		}
+
+		var statusResp api.SiteStatusResponse
+		if err := json.Unmarshal(body, &statusResp); err != nil {
+			continue
+		}
+
+		b := statusResp.Build
+		if b == nil {
+			if pollCount%progressEvery == 0 {
+				fmt.Println("  ...no build yet (Hatchet dispatch still starting)")
+			}
+			continue
+		}
+
+		// The latest build's commit must match our pushed commit before we
+		// trust its terminal state — otherwise we may be reading the previous
+		// build that finished before our dispatch landed.
+		if b.Commit != commitSha {
+			if pollCount%progressEvery == 0 {
+				fmt.Printf("  ...waiting (latest build #%d on a different commit)\n", b.Number)
+			}
+			continue
+		}
+
+		lastBuildNumber = b.Number
+		lastBuildStatus = b.Status
+
+		if b.FinishedAt == 0 {
+			if pollCount%progressEvery == 0 {
+				fmt.Printf("  ...build #%d %s\n", b.Number, b.Status)
+			}
+			continue
+		}
+
+		// Terminal state.
+		if b.Status == "success" {
+			fmt.Printf("✓ Build #%d succeeded\n", b.Number)
+			return nil
+		}
+		return fmt.Errorf("build #%d ended in %s", b.Number, b.Status)
+	}
+
+	if lastBuildNumber > 0 {
+		return fmt.Errorf("timed out after %ds waiting for build #%d (last status: %s)", timeoutSec, lastBuildNumber, lastBuildStatus)
+	}
+	return fmt.Errorf("timed out after %ds — no build matching commit %s observed", timeoutSec, commitSha[:7])
 }
 
 func runSiteLogs(cmd *cobra.Command, args []string) error {
