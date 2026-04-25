@@ -290,7 +290,6 @@ func ExecuteAgent(entity *api.PlanningEntity, inputs map[string]interface{}, cli
 // "Session ID already in use" errors on subprocess stderr trigger a bounded
 // retry loop (up to sessionConflictMaxAttempts with jittered backoff). The
 // retry is invisible to the caller — only the final attempt's result surfaces.
-// Retrieves memU memory context and appends to system prompt.
 func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interface{}, client *api.Client, serviceKey string, sender LogSender, seq *atomic.Int64, sessionID string, isResume bool, sessionRetryOnConflict bool) *ExecutionResult {
 	cli := resolveInnerLoopCli()
 	model := resolveInnerLoopModel()
@@ -305,17 +304,10 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 		}
 	}
 
-	// 2. Retrieve memU memory context for this entity (non-blocking)
-	memoryContext, memErr := client.RetrieveMemoryForEntity(entity.ID, serviceKey)
-	if memErr != nil {
-		// Log but don't fail — graceful degradation
-		fmt.Printf("[memU] Failed to retrieve memory context: %v\n", memErr)
-	}
-	if memoryContext != "" {
-		systemPrompt = systemPrompt + "\n\n" + memoryContext
-	}
+	// memU memory retrieval removed in memU teardown 2026-04-25
+	// (web route /api/memu/retrieve-for-entity is gone).
 
-	// 3. Write instruction file for non-Claude CLIs (includes memU context)
+	// 2. Write instruction file for non-Claude CLIs.
 	if cli != "claude" {
 		if writeErr := writeInstructionFile(cli, systemPrompt); writeErr != nil {
 			fmt.Printf("[inner-loop] Warning: failed to write instruction file: %v\n", writeErr)
