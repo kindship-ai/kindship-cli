@@ -304,9 +304,6 @@ func ExecuteAgentStreaming(entity *api.PlanningEntity, inputs map[string]interfa
 		}
 	}
 
-	// memU memory retrieval removed in memU teardown 2026-04-25
-	// (web route /api/memu/retrieve-for-entity is gone).
-
 	// 2. Write instruction file for non-Claude CLIs.
 	if cli != "claude" {
 		if writeErr := writeInstructionFile(cli, systemPrompt); writeErr != nil {

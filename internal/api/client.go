@@ -1484,8 +1484,6 @@ func (c *Client) FetchSystemPrompt(agentID, serviceKey string) (string, error) {
 	return result.Prompt, nil
 }
 
-// RetrieveMemoryForEntity removed in memU teardown 2026-04-25.
-// (web route /api/memu/retrieve-for-entity is gone.)
 
 // MoveEntity moves an entity to a new parent and/or sequence position.
 func (c *Client) MoveEntity(ctx *auth.Context, entityID string, moveReq EntityMoveRequest) (*EntityMoveResponse, error) {
