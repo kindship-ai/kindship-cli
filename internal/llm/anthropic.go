@@ -2,10 +2,10 @@
 // talks to directly — LiteLLM (Anthropic-compatible) + Gemini.
 //
 // These clients do NOT go through the kindship-vercel API. The voice
-// and strategy commands fetch a LiteLLM virtual key via the short,
-// CF-safe secrets endpoint, then call LiteLLM on the agent container's
-// own Docker network. That keeps long Opus calls off the path that
-// times out at 100s (Cloudflare).
+// commands fetch a LiteLLM virtual key via the short, CF-safe secrets
+// endpoint, then call LiteLLM on the agent container's own Docker
+// network. That keeps long Opus calls off the path that times out at
+// 100s (Cloudflare).
 package llm
 
 import (
@@ -21,7 +21,7 @@ import (
 )
 
 // AnthropicRequest is a subset of the Anthropic messages API body. We
-// only expose what the voice + strategy commands actually need.
+// only expose what the voice commands actually need.
 type AnthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
@@ -30,10 +30,9 @@ type AnthropicRequest struct {
 	Thinking    *AnthropicThinking `json:"thinking,omitempty"`
 	Temperature *float64           `json:"temperature,omitempty"`
 	// OutputConfig is an Opus-4.6 parameter biasing toward longer,
-	// higher-quality output. The web-side strategy generator always
-	// sets `{ effort: "high" }` (see strategy-generation.server.ts),
-	// and the Phase 0 probes pin the same shape. Omitting it would
-	// silently downgrade CLI-generated output vs. worker-generated.
+	// higher-quality output. The Phase 0 probes pin `{ effort: "high" }`
+	// for any caller that wants the same wall-clock shape; omitting it
+	// surfaces as faster, lower-effort output.
 	OutputConfig *AnthropicOutputConfig `json:"output_config,omitempty"`
 }
 

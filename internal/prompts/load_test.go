@@ -25,10 +25,10 @@ func setupSkillsRoot(t *testing.T, files map[string]string) string {
 
 func TestLoadAndRender(t *testing.T) {
 	setupSkillsRoot(t, map[string]string{
-		"kindship-strategy/prompts/generate-user.md": "Vision: {{vision}}\nAgent: {{agent_name}}",
+		"kindship-voice/prompts/test.md": "Vision: {{vision}}\nAgent: {{agent_name}}",
 	})
 
-	got, err := LoadAndRender("kindship-strategy", "generate-user", map[string]string{
+	got, err := LoadAndRender("kindship-voice", "test", map[string]string{
 		"vision":     "a quieter internet",
 		"agent_name": "akasha",
 	})

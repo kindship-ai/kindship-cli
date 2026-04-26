@@ -347,9 +347,8 @@ func callOpus(
 				Type:         "enabled",
 				BudgetTokens: voiceOpusThinkBudget,
 			},
-			// Match the web-side request shape (probe 4 pinned) — keeps
-			// CLI-generated audio quality aligned with whatever the
-			// worker-driven strategy/voice path produces.
+			// Match the probe-4 pinned request shape so CLI-generated
+			// audio stays at full Opus 4.6 effort.
 			OutputConfig: &llm.AnthropicOutputConfig{Effort: "high"},
 			Messages: []llm.AnthropicMessage{{
 				Role: "user",
