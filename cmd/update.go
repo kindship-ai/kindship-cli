@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 
 	"github.com/spf13/cobra"
@@ -65,10 +66,18 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Confirmed platform: %s\n", platform)
 	}
 
-	// Create temp file
-	tmpFile, err := os.CreateTemp("", "kindship-*")
+	// Create temp file in the SAME directory as the running binary. On Linux
+	// agent containers, /tmp is a tmpfs while /home/autonomous/.local/bin lives
+	// on a separate volume — using the system temp dir made os.Rename fail with
+	// EXDEV (cross-device link), which then fell back to an O_TRUNC write that
+	// hit ETXTBSY ("text file busy") because the binary was currently
+	// executing. Same-directory rename is atomic and tolerated even for a
+	// running binary: the kernel swaps the inode pointer, the running process
+	// keeps its old inode, and new invocations get the new binary.
+	execDir := filepath.Dir(execPath)
+	tmpFile, err := os.CreateTemp(execDir, ".kindship-update-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return fmt.Errorf("failed to create temp file in %s: %w", execDir, err)
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath) // Clean up on failure
@@ -92,26 +101,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println("Binary verified.")
 
-	// Replace current binary
+	// Atomic swap: rename within the same directory. Removes the previous
+	// dentry but the running process keeps its open inode; subsequent
+	// invocations resolve the new binary.
 	fmt.Printf("Replacing %s...\n", execPath)
 	if err := os.Rename(tmpPath, execPath); err != nil {
-		// On some systems, rename across filesystems fails
-		// Fall back to copy
-		src, err := os.Open(tmpPath)
-		if err != nil {
-			return fmt.Errorf("failed to open temp file: %w", err)
-		}
-		defer src.Close()
-
-		dst, err := os.OpenFile(execPath, os.O_WRONLY|os.O_TRUNC, 0755)
-		if err != nil {
-			return fmt.Errorf("failed to open destination: %w", err)
-		}
-		defer dst.Close()
-
-		if _, err := io.Copy(dst, src); err != nil {
-			return fmt.Errorf("failed to copy binary: %w", err)
-		}
+		return fmt.Errorf("failed to replace binary at %s: %w", execPath, err)
 	}
 
 	fmt.Println("Update complete!")

@@ -146,3 +146,27 @@ type SiteDomainRemoveResponse struct {
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
+
+// SiteVerifyResponse is the response from GET /api/cli/site/verify.
+//
+// All "absent or unparseable" cases collapse to nil — the receipt
+// reports what was observed, including 404s and missing sitemaps,
+// without treating them as errors. The CLI consumer applies its own
+// pass/fail threshold against these raw fields.
+//
+// EdgeStatus is non-pointer because the edge probe is always attempted
+// and reports 0 when the probe itself failed (network error). Every
+// other field is a pointer so absence is distinguishable from zero.
+type SiteVerifyResponse struct {
+	SiteName              string  `json:"site_name"`
+	CanonicalURL          string  `json:"canonical_url"`
+	FinalURL              *string `json:"final_url"`
+	EdgeStatus            int     `json:"edge_status"`
+	SitemapURL            *string `json:"sitemap_url"`
+	SitemapStatus         *int    `json:"sitemap_status"`
+	SitemapIsXML          *bool   `json:"sitemap_is_xml"`
+	SitemapURLCount       *int    `json:"sitemap_url_count"`
+	RoutePresentInSitemap *bool   `json:"route_present_in_sitemap"`
+	RouteStatus           *int    `json:"route_status"`
+	Error                 string  `json:"error,omitempty"`
+}

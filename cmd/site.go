@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,7 @@ Subcommands:
   status   Get site info and build status
   push     Upload project files
   logs     View build logs
+  verify   Verify the canonical domain serves the site
   delete   Delete a site
   domain   Manage custom domains`,
 }
@@ -113,6 +115,26 @@ Examples:
   kindship site logs my-app --format json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSiteLogs,
+}
+
+var siteVerifyCmd = &cobra.Command{
+	Use:   "verify <name>",
+	Short: "Verify the canonical domain serves the site",
+	Long: `Probe the public edge of a site and report a structured receipt:
+canonical URL, edge status (HEAD with GET fallback), sitemap status +
+URL count when present, and an optional --route status check.
+
+Sitemap auto-generation is conditional on full pushes to routable
+custom-domain sites, so its absence is reported as null fields rather
+than a failure. Use --route to check a specific path; that GET status
+is the strongest signal that the deploy is actually serving content.
+
+Examples:
+  kindship site verify my-app
+  kindship site verify my-app --route /about
+  kindship site verify my-app --format json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSiteVerify,
 }
 
 var siteDeleteCmd = &cobra.Command{
@@ -219,6 +241,7 @@ var (
 	pushWait        bool
 	pushWaitTimeout int
 	logsBuild       int
+	verifyRoute     string
 )
 
 const containerSiteWorkspaceRoot = "/workspace/sites"
@@ -239,6 +262,9 @@ func init() {
 	sitePushCmd.Flags().IntVar(&pushWaitTimeout, "wait-timeout", 300, "Max seconds to wait for build completion when --wait is set. Default 300.")
 
 	siteLogsCmd.Flags().IntVar(&logsBuild, "build", 0, "Build number (default: latest)")
+
+	siteVerifyCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	siteVerifyCmd.Flags().StringVar(&verifyRoute, "route", "", "Optional relative route to GET (e.g. /about). Reports route_status separately from edge / sitemap.")
 
 	siteDomainCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteDomainSetCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
@@ -261,6 +287,7 @@ func init() {
 	siteCmd.AddCommand(siteStatusCmd)
 	siteCmd.AddCommand(sitePushCmd)
 	siteCmd.AddCommand(siteLogsCmd)
+	siteCmd.AddCommand(siteVerifyCmd)
 	siteCmd.AddCommand(siteDeleteCmd)
 	siteCmd.AddCommand(siteDomainCmd)
 	rootCmd.AddCommand(siteCmd)
@@ -2191,4 +2218,120 @@ func postSitePushDryRun(
 		return nil, fmt.Errorf("dry-run failed (%d): %s", resp.StatusCode, firstBytes(respBody, 300))
 	}
 	return &dryResp, nil
+}
+
+func runSiteVerify(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf(
+		"%s/api/cli/site/verify?site_name=%s&agent_id=%s",
+		ctx.APIBaseURL,
+		url.QueryEscape(args[0]),
+		url.QueryEscape(agentID),
+	)
+	if verifyRoute != "" {
+		endpoint += "&route=" + url.QueryEscape(verifyRoute)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to verify site: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return fmt.Errorf("failed to verify site: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp api.SiteVerifyResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("failed: %s", errResp.Error)
+		}
+		return fmt.Errorf("failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var verifyResp api.SiteVerifyResponse
+	if err := json.Unmarshal(body, &verifyResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if siteFormat == "json" {
+		return printJSON(verifyResp)
+	}
+
+	// Compact text receipt — pointer fields rendered as "—" when nil so the
+	// agent can tell "absent" apart from "zero" at a glance. Edge status is
+	// always shown; route block only when --route was supplied.
+	fmt.Printf("Site:     %s\n", verifyResp.SiteName)
+	fmt.Printf("URL:      %s\n", verifyResp.CanonicalURL)
+	if verifyResp.FinalURL != nil && *verifyResp.FinalURL != verifyResp.CanonicalURL {
+		fmt.Printf("Final:    %s\n", *verifyResp.FinalURL)
+	}
+	fmt.Printf("Edge:     %s\n", formatStatusInt(verifyResp.EdgeStatus))
+
+	if verifyResp.SitemapStatus != nil {
+		sitemapLine := formatStatusInt(*verifyResp.SitemapStatus)
+		if verifyResp.SitemapIsXML != nil && *verifyResp.SitemapIsXML && verifyResp.SitemapURLCount != nil {
+			sitemapLine += fmt.Sprintf(" (%d URLs)", *verifyResp.SitemapURLCount)
+		} else if verifyResp.SitemapIsXML != nil && !*verifyResp.SitemapIsXML {
+			sitemapLine += " (not XML)"
+		}
+		fmt.Printf("Sitemap:  %s\n", sitemapLine)
+	} else {
+		fmt.Println("Sitemap:  —")
+	}
+
+	if verifyRoute != "" {
+		if verifyResp.RouteStatus != nil {
+			routeLine := fmt.Sprintf("%s %s", verifyRoute, formatStatusInt(*verifyResp.RouteStatus))
+			if verifyResp.RoutePresentInSitemap != nil {
+				if *verifyResp.RoutePresentInSitemap {
+					routeLine += " (in sitemap)"
+				} else {
+					routeLine += " (not in sitemap)"
+				}
+			}
+			fmt.Printf("Route:    %s\n", routeLine)
+		} else {
+			fmt.Printf("Route:    %s —\n", verifyRoute)
+		}
+	}
+
+	return nil
+}
+
+// formatStatusInt prints an HTTP status as "200 OK" / "404 Not Found" /
+// "0 (no response)" — keeping the receipt readable when the edge probe
+// itself fails. Non-standard codes (e.g. Cloudflare's 522) get rendered
+// as just the number to avoid trailing whitespace.
+func formatStatusInt(status int) string {
+	if status == 0 {
+		return "0 (no response)"
+	}
+	if text := http.StatusText(status); text != "" {
+		return fmt.Sprintf("%d %s", status, text)
+	}
+	return fmt.Sprintf("%d", status)
 }
