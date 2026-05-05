@@ -168,8 +168,12 @@ func buildCliArgs(cli string, model string, systemPrompt string, taskPrompt stri
 		return "codex", args
 
 	case "gemini":
+		// --skip-trust is required because /workspace is not in gemini's
+		// trusted-folder list and headless (-p) mode refuses to run in
+		// untrusted folders. Without it, gemini exits 55 silently.
 		args = []string{
 			"--yolo",
+			"--skip-trust",
 			"-o", "stream-json",
 			"-p", taskPrompt,
 		}

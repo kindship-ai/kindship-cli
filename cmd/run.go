@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -456,6 +460,20 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 		return false, fmt.Errorf("failed to complete execution: %w", err)
 	}
 
+	// If this run was driven by a heartbeat file (env set by the workflow
+	// or by an operator's manual `kindship run` invocation), tell the
+	// picker we consumed it. For oneoff files this is what removes them
+	// from disk so they don't fire again. The Hatchet workflow also
+	// commits via /api/heartbeat-picker after the CLI returns; double-
+	// commit on a oneoff is harmless (file already gone, state entry
+	// already cleaned). For recurring files the second commit increments
+	// the runs counter twice — minor metric drift, not a correctness bug.
+	if result.Success {
+		if hb := os.Getenv("KINDSHIP_HEARTBEAT_FILE"); hb != "" {
+			commitHeartbeatPicker(hb, log)
+		}
+	}
+
 	totalDuration := time.Since(startTime)
 	log.WithDuration("Run command completed", totalDuration, map[string]interface{}{
 		"success":      result.Success,
@@ -463,6 +481,73 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	})
 
 	return result.Success, nil
+}
+
+// commitHeartbeatPicker invokes the on-container picker's `commit`
+// subcommand. Reads the file's YAML frontmatter to determine whether
+// to pass --oneoff (which causes the picker to delete the file).
+// Failures are logged at warn level — they don't fail the run.
+func commitHeartbeatPicker(heartbeatPath string, log *logging.Logger) {
+	name := filepath.Base(heartbeatPath)
+	oneoff := readHeartbeatOneoffFlag(heartbeatPath)
+
+	pickerPath := filepath.Join(os.Getenv("HOME"), ".kindship", "heartbeats", ".pick.py")
+	if _, err := os.Stat(pickerPath); err != nil {
+		// Fall back to the workspace-state location used when $HOME is
+		// unavailable — see _pick.py STATE_FALLBACK.
+		pickerPath = "/workspace/.kindship-state/.pick.py"
+	}
+
+	args := []string{pickerPath, "commit", "--name", name}
+	if oneoff {
+		args = append(args, "--oneoff")
+	}
+	cmd := exec.Command("python3", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Warn("Heartbeat picker commit failed", map[string]interface{}{
+			"heartbeat_file": name,
+			"oneoff":         oneoff,
+			"error":          err.Error(),
+			"output":         string(out),
+		})
+		return
+	}
+	log.Info("Heartbeat picker committed", map[string]interface{}{
+		"heartbeat_file": name,
+		"oneoff":         oneoff,
+	})
+}
+
+// readHeartbeatOneoffFlag scans the file's YAML frontmatter for a top-
+// level `oneoff: true` line. Strict subset matching the picker's parser:
+// frontmatter is delimited by `---` lines at the top of the file.
+// Any read error or absent flag returns false.
+func readHeartbeatOneoffFlag(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() || strings.TrimSpace(scanner.Text()) != "---" {
+		return false
+	}
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "---" {
+			return false
+		}
+		// Match `oneoff: true` (case-insensitive on the value, allow
+		// optional surrounding whitespace and quotes around the value).
+		if strings.HasPrefix(line, "oneoff:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "oneoff:"))
+			val = strings.Trim(val, `"' `)
+			return strings.EqualFold(val, "true")
+		}
+	}
+	return false
 }
 
 // runOrchestration creates a new ORCHESTRATE run for any entity with
