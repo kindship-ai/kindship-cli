@@ -111,6 +111,14 @@ type ExecutionStartRequest struct {
 	ParentRun           string        `json:"parent_run,omitempty"`
 }
 
+// HeartbeatExecutionStartRequest starts a heartbeat schedule run.
+type HeartbeatExecutionStartRequest struct {
+	ScheduleID string `json:"schedule_id"`
+	AgentID    string `json:"agent_id"`
+	CLI        string `json:"cli,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+}
+
 // ExecutionStartResponse represents the response from starting an execution
 type ExecutionStartResponse struct {
 	ExecutionID   string                 `json:"execution_id"`
@@ -348,7 +356,7 @@ type ImportResponse struct {
 type ImportResult struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
-	Action    string `json:"action"`              // "created", "updated", or "skipped"
+	Action    string `json:"action"`               // "created", "updated", or "skipped"
 	Error     string `json:"error,omitempty"`      // reason if skipped
 	ErrorCode string `json:"error_code,omitempty"` // PostgreSQL error code if skipped
 }

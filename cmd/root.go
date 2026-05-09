@@ -20,6 +20,7 @@ For local development:
 For agent containers:
   kindship auth        Inject secrets into subprocess environment
   kindship run <id>    Execute a planning entity (auto-detects type)
+  kindship heartbeat   Execute heartbeat schedules
   kindship agent loop  Run autonomous execution loop`,
 }
 
