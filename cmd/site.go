@@ -2386,8 +2386,18 @@ func postSitePushDryRunFinalize(
 		return nil, fmt.Errorf("failed to parse dry-run response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		attemptID := dryResp.AttemptID
+		if attemptID == "" {
+			attemptID = body.AttemptID
+		}
 		if dryResp.Error != "" {
+			if attemptID != "" {
+				return nil, fmt.Errorf("dry-run failed: %s (attempt_id: %s; check with `kindship site push-status %s`)", dryResp.Error, attemptID, attemptID)
+			}
 			return nil, fmt.Errorf("dry-run failed: %s", dryResp.Error)
+		}
+		if attemptID != "" {
+			return nil, fmt.Errorf("dry-run failed (%d): %s (attempt_id: %s; check with `kindship site push-status %s`)", resp.StatusCode, firstBytes(respBody, 300), attemptID, attemptID)
 		}
 		return nil, fmt.Errorf("dry-run failed (%d): %s", resp.StatusCode, firstBytes(respBody, 300))
 	}

@@ -217,6 +217,36 @@ func TestPostSitePushDryRunUsesSignedUploadFlow(t *testing.T) {
 	}
 }
 
+func TestPostSitePushDryRunFinalizeErrorIncludesAttemptID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/site/push/dry-run" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"attempt_id":"attempt-dry","status":"failed","error_code":"archive_validation_failed","error":"archive was invalid"}`))
+	}))
+	defer server.Close()
+
+	ctx := &auth.Context{Method: auth.AuthMethodServiceKey, Token: "sk", APIBaseURL: server.URL}
+	_, err := postSitePushDryRunFinalize(ctx, api.SitePushFinalizeRequest{
+		AttemptID:   "attempt-dry",
+		SiteName:    "demo-site",
+		AgentID:     "agent-1",
+		StagingPath: "demo-site/dry.tar.gz",
+		DryRun:      true,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	got := err.Error()
+	for _, want := range []string{"archive was invalid", "attempt-dry", "kindship site push-status attempt-dry"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestPostSitePushInitReportsNonJSON413(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
