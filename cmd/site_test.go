@@ -156,6 +156,65 @@ func TestPostSitePushFinalizePropagatesAttemptFields(t *testing.T) {
 	}
 }
 
+func TestPostSitePushFinalizeAcceptsReconcilingAttempt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/site/push/finalize" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"attempt_id":"attempt-accepted","status":"timed_out","error_code":"gitea_commit_timeout_maybe_committed","error":"Push accepted but still reconciling"}`))
+	}))
+	defer server.Close()
+
+	ctx := &auth.Context{Method: auth.AuthMethodServiceKey, Token: "sk", APIBaseURL: server.URL}
+	resp, err := postSitePushFinalize(ctx, api.SitePushFinalizeRequest{
+		AttemptID:   "attempt-accepted",
+		SiteName:    "demo-site",
+		AgentID:     "agent-1",
+		StagingPath: "demo-site/archive.tar.gz",
+	})
+	if err != nil {
+		t.Fatalf("postSitePushFinalize returned error: %v", err)
+	}
+	if resp.AttemptID != "attempt-accepted" || resp.Status != "timed_out" || resp.ErrorCode != "gitea_commit_timeout_maybe_committed" {
+		t.Fatalf("unexpected accepted response: %#v", resp)
+	}
+}
+
+func TestReconcileAcceptedPushPreservesAcceptedWhenSiteStatusFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/cli/site/push/status":
+			_, _ = w.Write([]byte(`{"attempt":{"attempt_id":"attempt-accepted","site_name":"demo-site","status":"timed_out","error_code":"gitea_commit_timeout_maybe_committed"}}`))
+		case "/api/cli/site/status":
+			w.WriteHeader(http.StatusFailedDependency)
+			_, _ = w.Write([]byte(`{"error":"woodpecker temporarily unavailable"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ctx := &auth.Context{Method: auth.AuthMethodOAuth, Token: "sk", AgentID: "agent-1", APIBaseURL: server.URL}
+	pushResp := &api.SitePushResponse{
+		AttemptID: "attempt-accepted",
+		Status:    "timed_out",
+		ErrorCode: "gitea_commit_timeout_maybe_committed",
+	}
+	statusResp, err := reconcileAcceptedPush(ctx, "demo-site", "agent-1", pushResp)
+	if err != nil {
+		t.Fatalf("reconcileAcceptedPush returned error: %v", err)
+	}
+	if statusResp != nil {
+		t.Fatalf("expected no status response, got %#v", statusResp)
+	}
+	if pushResp.Status != "timed_out" || pushResp.AttemptID != "attempt-accepted" {
+		t.Fatalf("accepted push response was not preserved: %#v", pushResp)
+	}
+}
+
 func TestPostSitePushDryRunUsesSignedUploadFlow(t *testing.T) {
 	var initBody map[string]any
 	var finalizeBody map[string]any

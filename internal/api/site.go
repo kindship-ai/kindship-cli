@@ -62,6 +62,11 @@ type SitePushResponse struct {
 	Status          string   `json:"status,omitempty"`
 	ErrorCode       string   `json:"error_code,omitempty"`
 	CommitSha       string   `json:"commit_sha"`
+	BuildNumber     int      `json:"build_number,omitempty"`
+	BuildStatus     string   `json:"build_status,omitempty"`
+	BuildCommit     string   `json:"build_commit,omitempty"`
+	BuildStartedAt  int64    `json:"build_started_at,omitempty"`
+	BuildFinishedAt int64    `json:"build_finished_at,omitempty"`
 	FilesPushed     int      `json:"files_pushed"`
 	Message         string   `json:"message"`
 	SourceDir       string   `json:"source_dir,omitempty"`
@@ -133,20 +138,27 @@ type SitePushDryRunResponse struct {
 // SitePushAttempt is the durable server-side attempt record surfaced by
 // push-status and, when available, embedded into site status.
 type SitePushAttempt struct {
-	AttemptID     string  `json:"attempt_id"`
-	SiteName      string  `json:"site_name,omitempty"`
-	Status        string  `json:"status"`
-	ErrorCode     string  `json:"error_code,omitempty"`
-	Error         string  `json:"error,omitempty"`
-	CommitSha     string  `json:"commit_sha,omitempty"`
-	FilesPushed   int     `json:"files_pushed,omitempty"`
-	FilesArchived int     `json:"files_archived,omitempty"`
-	ArchiveSize   int64   `json:"archive_size,omitempty"`
-	Partial       bool    `json:"partial,omitempty"`
-	DryRun        bool    `json:"dry_run,omitempty"`
-	CreatedAt     string  `json:"created_at,omitempty"`
-	UpdatedAt     string  `json:"updated_at,omitempty"`
-	CompletedAt   *string `json:"completed_at,omitempty"`
+	AttemptID           string  `json:"attempt_id"`
+	SiteName            string  `json:"site_name,omitempty"`
+	Status              string  `json:"status"`
+	ErrorCode           string  `json:"error_code,omitempty"`
+	Error               string  `json:"error,omitempty"`
+	CommitSha           string  `json:"commit_sha,omitempty"`
+	FilesPushed         int     `json:"files_pushed,omitempty"`
+	FilesArchived       int     `json:"files_archived,omitempty"`
+	ArchiveSize         int64   `json:"archive_size,omitempty"`
+	BaselineBuildNumber int     `json:"baseline_build_number,omitempty"`
+	BuildNumber         int     `json:"build_number,omitempty"`
+	BuildStatus         string  `json:"build_status,omitempty"`
+	BuildCommit         string  `json:"build_commit,omitempty"`
+	BuildStartedAt      int64   `json:"build_started_at,omitempty"`
+	BuildFinishedAt     int64   `json:"build_finished_at,omitempty"`
+	ResolvedFromBuild   bool    `json:"resolved_from_build,omitempty"`
+	Partial             bool    `json:"partial,omitempty"`
+	DryRun              bool    `json:"dry_run,omitempty"`
+	CreatedAt           string  `json:"created_at,omitempty"`
+	UpdatedAt           string  `json:"updated_at,omitempty"`
+	CompletedAt         *string `json:"completed_at,omitempty"`
 }
 
 // SitePushStatusResponse is the response from GET /api/cli/site/push/status.

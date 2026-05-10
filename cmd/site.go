@@ -1080,6 +1080,124 @@ func fetchSitePushStatus(ctx *auth.Context, attemptID string) (*api.SitePushStat
 	return &out, nil
 }
 
+func fetchSiteStatusResponse(ctx *auth.Context, siteName, agentID string) (*api.SiteStatusResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/site/status?site_name=%s&agent_id=%s", ctx.APIBaseURL, url.QueryEscape(siteName), url.QueryEscape(agentID))
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create site status request: %w", err)
+	}
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get site status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read site status response: %w", err)
+	}
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return nil, fmt.Errorf("failed to get site status: %w", err)
+	}
+
+	var out api.SiteStatusResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("failed to parse site status response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, fmt.Errorf("site status failed: %s", out.Error)
+		}
+		return nil, fmt.Errorf("site status failed (%d): %s", resp.StatusCode, firstBytes(body, 300))
+	}
+	return &out, nil
+}
+
+func isUnfinishedPushStatus(status string) bool {
+	switch status {
+	case "timed_out", "processing", "dispatching", "uploaded", "uploading", "initialized":
+		return true
+	default:
+		return false
+	}
+}
+
+func printAcceptedPushOutcome(resp api.SitePushResponse, statusResp *api.SiteStatusResponse) {
+	attemptID := resp.AttemptID
+	if statusResp != nil && statusResp.LatestPushAttempt != nil && attemptID == "" {
+		attemptID = statusResp.LatestPushAttempt.AttemptID
+	}
+	if attemptID != "" {
+		fmt.Printf("Push accepted; attempt %s is still reconciling\n", attemptID)
+	} else {
+		fmt.Println("Push accepted; attempt is still reconciling")
+	}
+
+	if statusResp != nil && statusResp.Build != nil {
+		b := statusResp.Build
+		fmt.Printf("  Build:   #%d %s\n", b.Number, b.Status)
+	} else if resp.BuildNumber > 0 {
+		fmt.Printf("  Build:   #%d %s\n", resp.BuildNumber, resp.BuildStatus)
+	}
+	if attemptID != "" {
+		fmt.Printf("  Check:   kindship site push-status %s\n", attemptID)
+	}
+}
+
+func reconcileAcceptedPush(ctx *auth.Context, siteName, agentID string, resp *api.SitePushResponse) (*api.SiteStatusResponse, error) {
+	var statusResp *api.SiteStatusResponse
+
+	if resp.AttemptID != "" {
+		pushStatus, err := fetchSitePushStatus(ctx, resp.AttemptID)
+		if err == nil && pushStatus.Attempt != nil {
+			a := pushStatus.Attempt
+			resp.Status = a.Status
+			resp.ErrorCode = a.ErrorCode
+			resp.CommitSha = a.CommitSha
+			resp.FilesPushed = a.FilesPushed
+			resp.BuildNumber = a.BuildNumber
+			resp.BuildStatus = a.BuildStatus
+			resp.BuildCommit = a.BuildCommit
+			resp.BuildStartedAt = a.BuildStartedAt
+			resp.BuildFinishedAt = a.BuildFinishedAt
+			if a.Status == "failed" {
+				return nil, fmt.Errorf("push attempt %s failed: %s", a.AttemptID, a.Error)
+			}
+		}
+	}
+
+	var err error
+	statusResp, err = fetchSiteStatusResponse(ctx, siteName, agentID)
+	if err != nil {
+		if isUnfinishedPushStatus(resp.Status) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if statusResp.LatestPushAttempt != nil && statusResp.LatestPushAttempt.AttemptID == resp.AttemptID {
+		a := statusResp.LatestPushAttempt
+		resp.Status = a.Status
+		resp.ErrorCode = a.ErrorCode
+		resp.CommitSha = a.CommitSha
+		resp.FilesPushed = a.FilesPushed
+		resp.BuildNumber = a.BuildNumber
+		resp.BuildStatus = a.BuildStatus
+		resp.BuildCommit = a.BuildCommit
+		resp.BuildStartedAt = a.BuildStartedAt
+		resp.BuildFinishedAt = a.BuildFinishedAt
+		if a.Status == "failed" {
+			return statusResp, fmt.Errorf("push attempt %s failed: %s", a.AttemptID, a.Error)
+		}
+	}
+
+	return statusResp, nil
+}
+
 func runSitePush(cmd *cobra.Command, args []string) error {
 	ctx, err := auth.GetAuthContext()
 	if err != nil {
@@ -1200,17 +1318,41 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		pushResp.AttemptID = initResp.AttemptID
 	}
 
+	var reconciledStatus *api.SiteStatusResponse
+	if isUnfinishedPushStatus(pushResp.Status) && pushResp.CommitSha == "" {
+		var reconcileErr error
+		reconciledStatus, reconcileErr = reconcileAcceptedPush(ctx, siteName, agentID, pushResp)
+		if reconcileErr != nil && pushResp.Status == "failed" {
+			return reconcileErr
+		}
+	}
+
 	if siteFormat == "json" {
 		return printJSON(pushResp)
+	}
+
+	if isUnfinishedPushStatus(pushResp.Status) {
+		if pushWait && pushResp.CommitSha != "" {
+			return waitForBuildCompletion(ctx, siteName, agentID, pushResp.CommitSha, pushWaitTimeout)
+		}
+		printAcceptedPushOutcome(*pushResp, reconciledStatus)
+		return nil
 	}
 
 	sha := pushResp.CommitSha
 	if len(sha) > 7 {
 		sha = sha[:7]
 	}
-	fmt.Printf("✓ Pushed %d files (commit %s)\n", pushResp.FilesPushed, sha)
+	if pushResp.FilesPushed > 0 {
+		fmt.Printf("✓ Pushed %d files (commit %s)\n", pushResp.FilesPushed, sha)
+	} else {
+		fmt.Printf("✓ Push reconciled (commit %s)\n", sha)
+	}
 	if pushResp.AttemptID != "" {
 		fmt.Printf("  Attempt: %s\n", pushResp.AttemptID)
+	}
+	if pushResp.BuildNumber > 0 {
+		fmt.Printf("  Build:   #%d %s\n", pushResp.BuildNumber, pushResp.BuildStatus)
 	}
 	fmt.Printf("  Source:  %s\n", dir)
 	fmt.Println("  Build triggered")
@@ -2126,6 +2268,12 @@ func renderSitePushStatus(resp api.SitePushStatusResponse) error {
 		}
 		fmt.Printf("  Commit:  %s\n", sha)
 	}
+	if a.BuildNumber > 0 {
+		fmt.Printf("  Build:   #%d %s\n", a.BuildNumber, a.BuildStatus)
+	}
+	if a.ResolvedFromBuild {
+		fmt.Println("  Source:  reconciled from build")
+	}
 	if a.FilesPushed > 0 {
 		fmt.Printf("  Pushed:  %d files\n", a.FilesPushed)
 	}
@@ -2288,11 +2436,24 @@ func postSitePushFinalize(
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("parse finalize response: %w: %s", err, firstBytes(respBody, 300))
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		attemptID := out.AttemptID
+		if attemptID == "" {
+			attemptID = body.AttemptID
+		}
 		if out.Error != "" {
+			if attemptID != "" {
+				return nil, fmt.Errorf("push failed: %s (attempt_id: %s; check with `kindship site push-status %s`)", out.Error, attemptID, attemptID)
+			}
 			return nil, fmt.Errorf("push failed: %s", out.Error)
 		}
+		if attemptID != "" {
+			return nil, fmt.Errorf("push failed (%d): %s (attempt_id: %s; check with `kindship site push-status %s`)", resp.StatusCode, firstBytes(respBody, 300), attemptID, attemptID)
+		}
 		return nil, fmt.Errorf("push failed (%d): %s", resp.StatusCode, firstBytes(respBody, 300))
+	}
+	if out.AttemptID == "" {
+		out.AttemptID = body.AttemptID
 	}
 	return &out, nil
 }
