@@ -1149,6 +1149,18 @@ func printAcceptedPushOutcome(resp api.SitePushResponse, statusResp *api.SiteSta
 	}
 }
 
+func applyAttemptToPushResponse(resp *api.SitePushResponse, a *api.SitePushAttempt) {
+	resp.Status = a.Status
+	resp.ErrorCode = a.ErrorCode
+	resp.CommitSha = a.CommitSha
+	resp.FilesPushed = a.FilesPushed
+	resp.BuildNumber = a.BuildNumber
+	resp.BuildStatus = a.BuildStatus
+	resp.BuildCommit = a.BuildCommit
+	resp.BuildStartedAt = a.BuildStartedAt
+	resp.BuildFinishedAt = a.BuildFinishedAt
+}
+
 func reconcileAcceptedPush(ctx *auth.Context, siteName, agentID string, resp *api.SitePushResponse) (*api.SiteStatusResponse, error) {
 	var statusResp *api.SiteStatusResponse
 
@@ -1156,15 +1168,7 @@ func reconcileAcceptedPush(ctx *auth.Context, siteName, agentID string, resp *ap
 		pushStatus, err := fetchSitePushStatus(ctx, resp.AttemptID)
 		if err == nil && pushStatus.Attempt != nil {
 			a := pushStatus.Attempt
-			resp.Status = a.Status
-			resp.ErrorCode = a.ErrorCode
-			resp.CommitSha = a.CommitSha
-			resp.FilesPushed = a.FilesPushed
-			resp.BuildNumber = a.BuildNumber
-			resp.BuildStatus = a.BuildStatus
-			resp.BuildCommit = a.BuildCommit
-			resp.BuildStartedAt = a.BuildStartedAt
-			resp.BuildFinishedAt = a.BuildFinishedAt
+			applyAttemptToPushResponse(resp, a)
 			if a.Status == "failed" {
 				return nil, fmt.Errorf("push attempt %s failed: %s", a.AttemptID, a.Error)
 			}
@@ -1181,15 +1185,7 @@ func reconcileAcceptedPush(ctx *auth.Context, siteName, agentID string, resp *ap
 	}
 	if statusResp.LatestPushAttempt != nil && statusResp.LatestPushAttempt.AttemptID == resp.AttemptID {
 		a := statusResp.LatestPushAttempt
-		resp.Status = a.Status
-		resp.ErrorCode = a.ErrorCode
-		resp.CommitSha = a.CommitSha
-		resp.FilesPushed = a.FilesPushed
-		resp.BuildNumber = a.BuildNumber
-		resp.BuildStatus = a.BuildStatus
-		resp.BuildCommit = a.BuildCommit
-		resp.BuildStartedAt = a.BuildStartedAt
-		resp.BuildFinishedAt = a.BuildFinishedAt
+		applyAttemptToPushResponse(resp, a)
 		if a.Status == "failed" {
 			return statusResp, fmt.Errorf("push attempt %s failed: %s", a.AttemptID, a.Error)
 		}
@@ -1327,14 +1323,27 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if pushWait && pushResp.CommitSha != "" {
+		waitStatus, waitErr := waitForBuildCompletionStatus(ctx, siteName, agentID, pushResp.CommitSha, pushWaitTimeout, siteFormat != "json")
+		if waitStatus != nil && waitStatus.LatestPushAttempt != nil && waitStatus.LatestPushAttempt.AttemptID == pushResp.AttemptID {
+			applyAttemptToPushResponse(pushResp, waitStatus.LatestPushAttempt)
+		} else if waitStatus != nil && waitStatus.Build != nil {
+			pushResp.BuildNumber = waitStatus.Build.Number
+			pushResp.BuildStatus = waitStatus.Build.Status
+			pushResp.BuildCommit = waitStatus.Build.Commit
+			pushResp.BuildStartedAt = waitStatus.Build.StartedAt
+			pushResp.BuildFinishedAt = waitStatus.Build.FinishedAt
+		}
+		if waitErr != nil {
+			return waitErr
+		}
+	}
+
 	if siteFormat == "json" {
 		return printJSON(pushResp)
 	}
 
 	if isUnfinishedPushStatus(pushResp.Status) {
-		if pushWait && pushResp.CommitSha != "" {
-			return waitForBuildCompletion(ctx, siteName, agentID, pushResp.CommitSha, pushWaitTimeout)
-		}
 		printAcceptedPushOutcome(*pushResp, reconciledStatus)
 		return nil
 	}
@@ -1363,10 +1372,6 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Skipped denied: %s\n", strings.Join(pushResp.SkippedDenied, ", "))
 	}
 
-	if pushWait {
-		return waitForBuildCompletion(ctx, siteName, agentID, pushResp.CommitSha, pushWaitTimeout)
-	}
-
 	return nil
 }
 
@@ -1379,6 +1384,11 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 // Woodpecker that count as success: "success". Anything else with finished_at
 // set is a failure (failure, killed, declined, error).
 func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha string, timeoutSec int) error {
+	_, err := waitForBuildCompletionStatus(ctx, siteName, agentID, commitSha, timeoutSec, true)
+	return err
+}
+
+func waitForBuildCompletionStatus(ctx *auth.Context, siteName, agentID, commitSha string, timeoutSec int, emitProgress bool) (*api.SiteStatusResponse, error) {
 	const pollInterval = 3 * time.Second
 	const progressEvery = 4 // print one waiting line every ~12s
 
@@ -1386,7 +1396,9 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 	endpoint := fmt.Sprintf("%s/api/cli/site/status?site_name=%s&agent_id=%s", ctx.APIBaseURL, siteName, agentID)
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	fmt.Printf("  Waiting for build (timeout %ds)...\n", timeoutSec)
+	if emitProgress {
+		fmt.Printf("  Waiting for build (timeout %ds)...\n", timeoutSec)
+	}
 
 	pollCount := 0
 	var lastBuildNumber int
@@ -1398,7 +1410,7 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 
 		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 		if err != nil {
-			return fmt.Errorf("failed to create status request: %w", err)
+			return nil, fmt.Errorf("failed to create status request: %w", err)
 		}
 		ctx.SetAuthHeaders(req)
 		req.Header.Set("X-Kindship-CLI-Version", Version)
@@ -1406,7 +1418,7 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 		resp, err := client.Do(req)
 		if err != nil {
 			// Transient network errors during polling: keep going until deadline.
-			if pollCount%progressEvery == 0 {
+			if emitProgress && pollCount%progressEvery == 0 {
 				fmt.Printf("  ...status poll error: %v (will retry)\n", err)
 			}
 			continue
@@ -1415,7 +1427,7 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			if pollCount%progressEvery == 0 {
+			if emitProgress && pollCount%progressEvery == 0 {
 				fmt.Printf("  ...status %d (will retry)\n", resp.StatusCode)
 			}
 			continue
@@ -1428,7 +1440,7 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 
 		b := statusResp.Build
 		if b == nil {
-			if pollCount%progressEvery == 0 {
+			if emitProgress && pollCount%progressEvery == 0 {
 				fmt.Println("  ...no build yet (Hatchet dispatch still starting)")
 			}
 			continue
@@ -1438,7 +1450,7 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 		// trust its terminal state — otherwise we may be reading the previous
 		// build that finished before our dispatch landed.
 		if b.Commit != commitSha {
-			if pollCount%progressEvery == 0 {
+			if emitProgress && pollCount%progressEvery == 0 {
 				fmt.Printf("  ...waiting (latest build #%d on a different commit)\n", b.Number)
 			}
 			continue
@@ -1448,7 +1460,7 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 		lastBuildStatus = b.Status
 
 		if b.FinishedAt == 0 {
-			if pollCount%progressEvery == 0 {
+			if emitProgress && pollCount%progressEvery == 0 {
 				fmt.Printf("  ...build #%d %s\n", b.Number, b.Status)
 			}
 			continue
@@ -1456,16 +1468,18 @@ func waitForBuildCompletion(ctx *auth.Context, siteName, agentID, commitSha stri
 
 		// Terminal state.
 		if b.Status == "success" {
-			fmt.Printf("✓ Build #%d succeeded\n", b.Number)
-			return nil
+			if emitProgress {
+				fmt.Printf("✓ Build #%d succeeded\n", b.Number)
+			}
+			return &statusResp, nil
 		}
-		return fmt.Errorf("build #%d ended in %s", b.Number, b.Status)
+		return &statusResp, fmt.Errorf("build #%d ended in %s", b.Number, b.Status)
 	}
 
 	if lastBuildNumber > 0 {
-		return fmt.Errorf("timed out after %ds waiting for build #%d (last status: %s)", timeoutSec, lastBuildNumber, lastBuildStatus)
+		return nil, fmt.Errorf("timed out after %ds waiting for build #%d (last status: %s)", timeoutSec, lastBuildNumber, lastBuildStatus)
 	}
-	return fmt.Errorf("timed out after %ds — no build matching commit %s observed", timeoutSec, commitSha[:7])
+	return nil, fmt.Errorf("timed out after %ds — no build matching commit %s observed", timeoutSec, commitSha[:7])
 }
 
 func runSiteLogs(cmd *cobra.Command, args []string) error {
