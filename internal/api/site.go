@@ -47,9 +47,10 @@ type SiteListResponse struct {
 
 // SiteStatusResponse is the response from GET /api/cli/site/status
 type SiteStatusResponse struct {
-	Site  *SiteInfo  `json:"site,omitempty"`
-	Build *SiteBuild `json:"build"`
-	Error string     `json:"error,omitempty"`
+	Site              *SiteInfo        `json:"site,omitempty"`
+	Build             *SiteBuild       `json:"build"`
+	LatestPushAttempt *SitePushAttempt `json:"latest_push_attempt,omitempty"`
+	Error             string           `json:"error,omitempty"`
 }
 
 // SitePushResponse is the response from POST /api/cli/site/push (legacy
@@ -57,6 +58,9 @@ type SiteStatusResponse struct {
 // step of the new two-step flow). Both share the same success shape so
 // callers can render either path identically.
 type SitePushResponse struct {
+	AttemptID       string   `json:"attempt_id,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	ErrorCode       string   `json:"error_code,omitempty"`
 	CommitSha       string   `json:"commit_sha"`
 	FilesPushed     int      `json:"files_pushed"`
 	Message         string   `json:"message"`
@@ -73,12 +77,18 @@ type SitePushInitRequest struct {
 	SiteName    string `json:"site_name"`
 	AgentID     string `json:"agent_id,omitempty"`
 	ArchiveSize int64  `json:"archive_size"`
+	FileCount   int    `json:"file_count,omitempty"`
+	Partial     bool   `json:"partial,omitempty"`
+	DryRun      bool   `json:"dry_run,omitempty"`
 }
 
 // SitePushInitResponse is the response from POST /api/cli/site/push/init.
 // upload_url is a short-lived Supabase Storage signed PUT URL; the CLI
 // uploads the tar.gz directly to it (no Vercel function body cap).
 type SitePushInitResponse struct {
+	AttemptID   string `json:"attempt_id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
 	StagingPath string `json:"staging_path"`
 	UploadURL   string `json:"upload_url"`
 	UploadToken string `json:"upload_token"`
@@ -88,11 +98,13 @@ type SitePushInitResponse struct {
 // SitePushFinalizeRequest is the request body for POST /api/cli/site/push/finalize.
 // staging_path must match the path returned from /init for the same site.
 type SitePushFinalizeRequest struct {
+	AttemptID   string `json:"attempt_id,omitempty"`
 	SiteName    string `json:"site_name"`
 	AgentID     string `json:"agent_id,omitempty"`
 	StagingPath string `json:"staging_path"`
 	Message     string `json:"message,omitempty"`
 	Partial     bool   `json:"partial,omitempty"`
+	DryRun      bool   `json:"dry_run,omitempty"`
 }
 
 // SitePushDryRunChange describes a single file that would change in a push.
@@ -106,6 +118,9 @@ type SitePushDryRunChange struct {
 // SitePushDryRunResponse is the response from POST /api/cli/site/push/dry-run.
 // Reports what a push would change without triggering a build.
 type SitePushDryRunResponse struct {
+	AttemptID       string                 `json:"attempt_id,omitempty"`
+	Status          string                 `json:"status,omitempty"`
+	ErrorCode       string                 `json:"error_code,omitempty"`
 	FilesInArchive  int                    `json:"files_in_archive"`
 	Changes         []SitePushDryRunChange `json:"changes"`
 	AffectedRoutes  []string               `json:"affected_routes"`
@@ -113,6 +128,31 @@ type SitePushDryRunResponse struct {
 	SkippedDenied   []string               `json:"skipped_denied"`
 	Partial         bool                   `json:"partial"`
 	Error           string                 `json:"error,omitempty"`
+}
+
+// SitePushAttempt is the durable server-side attempt record surfaced by
+// push-status and, when available, embedded into site status.
+type SitePushAttempt struct {
+	AttemptID     string  `json:"attempt_id"`
+	SiteName      string  `json:"site_name,omitempty"`
+	Status        string  `json:"status"`
+	ErrorCode     string  `json:"error_code,omitempty"`
+	Error         string  `json:"error,omitempty"`
+	CommitSha     string  `json:"commit_sha,omitempty"`
+	FilesPushed   int     `json:"files_pushed,omitempty"`
+	FilesArchived int     `json:"files_archived,omitempty"`
+	ArchiveSize   int64   `json:"archive_size,omitempty"`
+	Partial       bool    `json:"partial,omitempty"`
+	DryRun        bool    `json:"dry_run,omitempty"`
+	CreatedAt     string  `json:"created_at,omitempty"`
+	UpdatedAt     string  `json:"updated_at,omitempty"`
+	CompletedAt   *string `json:"completed_at,omitempty"`
+}
+
+// SitePushStatusResponse is the response from GET /api/cli/site/push/status.
+type SitePushStatusResponse struct {
+	Attempt *SitePushAttempt `json:"attempt,omitempty"`
+	Error   string           `json:"error,omitempty"`
 }
 
 // SiteLogsResponse is the response from GET /api/cli/site/logs

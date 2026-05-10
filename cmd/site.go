@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,6 +31,7 @@ Subcommands:
   list     List your sites
   status   Get site info and build status
   push     Upload project files
+  push-status Check a durable push attempt
   logs     View build logs
   verify   Verify the canonical domain serves the site
   delete   Delete a site
@@ -71,6 +71,18 @@ Examples:
   kindship site status my-app --format json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSiteStatus,
+}
+
+var sitePushStatusCmd = &cobra.Command{
+	Use:   "push-status <attempt-id>",
+	Short: "Check a durable site push attempt",
+	Long: `Check the server-side status for a site push attempt.
+
+Examples:
+  kindship site push-status 018f...
+  kindship site push-status 018f... --format json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSitePushStatus,
 }
 
 var sitePushCmd = &cobra.Command{
@@ -250,6 +262,7 @@ func init() {
 	siteCreateCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteListCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteStatusCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	sitePushStatusCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteLogsCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteDeleteCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 
@@ -285,6 +298,7 @@ func init() {
 	siteCmd.AddCommand(siteCreateCmd)
 	siteCmd.AddCommand(siteListCmd)
 	siteCmd.AddCommand(siteStatusCmd)
+	siteCmd.AddCommand(sitePushStatusCmd)
 	siteCmd.AddCommand(sitePushCmd)
 	siteCmd.AddCommand(siteLogsCmd)
 	siteCmd.AddCommand(siteVerifyCmd)
@@ -304,6 +318,9 @@ func handleNonJSONResponse(statusCode int, body []byte) error {
 	snippet := string(body)
 	if len(snippet) > 200 {
 		snippet = snippet[:200] + "..."
+	}
+	if statusCode == http.StatusRequestEntityTooLarge {
+		return fmt.Errorf("server returned HTTP 413 payload too large with non-JSON body: %s", snippet)
 	}
 	return fmt.Errorf("server returned HTTP %d with non-JSON body: %s", statusCode, snippet)
 }
@@ -986,8 +1003,76 @@ func runSiteStatus(cmd *cobra.Command, args []string) error {
 	if site.LastError != nil {
 		fmt.Printf("  Error:   %s\n", *site.LastError)
 	}
+	if statusResp.LatestPushAttempt != nil {
+		a := statusResp.LatestPushAttempt
+		fmt.Printf("  Push:    %s (%s)\n", a.AttemptID, a.Status)
+		if a.ErrorCode != "" {
+			fmt.Printf("  Push error code: %s\n", a.ErrorCode)
+		}
+		if a.Error != "" {
+			fmt.Printf("  Push error: %s\n", a.Error)
+		}
+	}
 
 	return nil
+}
+
+func runSitePushStatus(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	statusResp, err := fetchSitePushStatus(ctx, args[0])
+	if err != nil {
+		return err
+	}
+
+	if siteFormat == "json" {
+		return printJSON(statusResp)
+	}
+	return renderSitePushStatus(*statusResp)
+}
+
+func fetchSitePushStatus(ctx *auth.Context, attemptID string) (*api.SitePushStatusResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/cli/site/push/status?id=%s", ctx.APIBaseURL, url.QueryEscape(attemptID))
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create push status request: %w", err)
+	}
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get push status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read push status response: %w", err)
+	}
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return nil, fmt.Errorf("failed to get push status: %w", err)
+	}
+
+	var out api.SitePushStatusResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("failed to parse push status response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, fmt.Errorf("push status failed: %s", out.Error)
+		}
+		return nil, fmt.Errorf("push status failed (%d): %s", resp.StatusCode, firstBytes(body, 300))
+	}
+	if out.Attempt == nil {
+		return nil, fmt.Errorf("push status response missing attempt")
+	}
+	return &out, nil
 }
 
 func runSitePush(cmd *cobra.Command, args []string) error {
@@ -1041,23 +1126,19 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no files to push in %s", dir)
 	}
 
-	// Buffer the archive once. Both --dry-run (legacy multipart) and
-	// the new two-step push flow (init → PUT → finalize) need to read
-	// the same bytes; archiveBuf is a *bytes.Buffer that can only be
-	// drained once, so we materialize the bytes here.
+	// Buffer the archive once. Both normal pushes and dry-runs now use
+	// the signed upload flow, so we materialize the bytes before the PUT.
 	archiveBytes := archiveBuf.Bytes()
 	partial := len(pushOnly) > 0
 
-	// --dry-run still uses the legacy multipart endpoint. Dry-runs
-	// inspect the archive contents server-side without touching Gitea
-	// or storage, so the path doesn't need the signed-URL flow.
 	if pushDryRun {
-		dryResp, err := postSitePushDryRun(ctx, dryRunArgs{
+		dryResp, err := postSitePushDryRun(ctx, sitePushUploadArgs{
 			siteName:     siteName,
 			agentID:      agentID,
 			message:      pushMessage,
 			partial:      partial,
 			archiveBytes: archiveBytes,
+			fileCount:    fileCount,
 		})
 		if err != nil {
 			return err
@@ -1068,24 +1149,37 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		return renderDryRun(*dryResp, dir)
 	}
 
-	// Two-step push: ask the server for a signed upload URL, PUT the
-	// tarball directly to Supabase Storage (bypasses Vercel's 4.5MB
-	// function body cap), then finalize so the server can dispatch
-	// the Hatchet workflow against the staged archive.
+	if siteFormat != "json" {
+		fmt.Printf("Archive: %d files, %s\n", fileCount, formatBytes(int64(len(archiveBytes))))
+		fmt.Println("Upload: initializing signed upload")
+	}
+
 	initResp, err := postSitePushInit(ctx, api.SitePushInitRequest{
 		SiteName:    siteName,
 		AgentID:     agentID,
 		ArchiveSize: int64(len(archiveBytes)),
+		FileCount:   fileCount,
+		Partial:     partial,
 	})
 	if err != nil {
 		return err
 	}
 
+	if siteFormat != "json" && initResp.AttemptID != "" {
+		fmt.Printf("Push attempt: %s\n", initResp.AttemptID)
+	}
+	if siteFormat != "json" {
+		fmt.Println("Upload: uploading archive")
+	}
 	if err := putSiteArchiveToSignedURL(initResp.UploadURL, archiveBytes); err != nil {
 		return fmt.Errorf("failed to upload archive: %w", err)
 	}
 
+	if siteFormat != "json" {
+		fmt.Println("Upload: finalizing")
+	}
 	pushResp, err := postSitePushFinalize(ctx, api.SitePushFinalizeRequest{
+		AttemptID:   initResp.AttemptID,
 		SiteName:    siteName,
 		AgentID:     agentID,
 		StagingPath: initResp.StagingPath,
@@ -1097,6 +1191,9 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 	}
 
 	pushResp.SourceDir = dir
+	if pushResp.AttemptID == "" {
+		pushResp.AttemptID = initResp.AttemptID
+	}
 
 	if siteFormat == "json" {
 		return printJSON(pushResp)
@@ -1107,6 +1204,9 @@ func runSitePush(cmd *cobra.Command, args []string) error {
 		sha = sha[:7]
 	}
 	fmt.Printf("✓ Pushed %d files (commit %s)\n", pushResp.FilesPushed, sha)
+	if pushResp.AttemptID != "" {
+		fmt.Printf("  Attempt: %s\n", pushResp.AttemptID)
+	}
 	fmt.Printf("  Source:  %s\n", dir)
 	fmt.Println("  Build triggered")
 	if len(pushResp.SkippedReserved) > 0 {
@@ -1935,6 +2035,9 @@ func renderDryRun(resp api.SitePushDryRunResponse, sourceDir string) error {
 		mode = "partial (--only) push"
 	}
 	fmt.Printf("Dry run — %s from %s\n", mode, sourceDir)
+	if resp.AttemptID != "" {
+		fmt.Printf("  Attempt: %s\n", resp.AttemptID)
+	}
 	fmt.Printf("  %d files in archive, %d would change\n", resp.FilesInArchive, len(resp.Changes))
 
 	if len(resp.AffectedRoutes) > 0 {
@@ -1989,6 +2092,44 @@ func renderDryRun(resp api.SitePushDryRunResponse, sourceDir string) error {
 	}
 
 	fmt.Println("\nNo build was triggered.")
+	return nil
+}
+
+func renderSitePushStatus(resp api.SitePushStatusResponse) error {
+	if resp.Attempt == nil {
+		return fmt.Errorf("push status response missing attempt")
+	}
+	a := resp.Attempt
+	fmt.Printf("Push attempt: %s\n", a.AttemptID)
+	if a.SiteName != "" {
+		fmt.Printf("  Site:    %s\n", a.SiteName)
+	}
+	fmt.Printf("  Status:  %s\n", a.Status)
+	if a.ErrorCode != "" {
+		fmt.Printf("  Code:    %s\n", a.ErrorCode)
+	}
+	if a.Error != "" {
+		fmt.Printf("  Error:   %s\n", a.Error)
+	}
+	if a.ArchiveSize > 0 || a.FilesArchived > 0 {
+		fmt.Printf("  Archive: %d files, %s\n", a.FilesArchived, formatBytes(a.ArchiveSize))
+	}
+	if a.CommitSha != "" {
+		sha := a.CommitSha
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		fmt.Printf("  Commit:  %s\n", sha)
+	}
+	if a.FilesPushed > 0 {
+		fmt.Printf("  Pushed:  %d files\n", a.FilesPushed)
+	}
+	if a.DryRun {
+		fmt.Println("  Dry run: true")
+	}
+	if a.Partial {
+		fmt.Println("  Partial: true")
+	}
 	return nil
 }
 
@@ -2151,57 +2292,85 @@ func postSitePushFinalize(
 	return &out, nil
 }
 
-// dryRunArgs bundles the inputs to the legacy dry-run multipart endpoint.
-type dryRunArgs struct {
+// sitePushUploadArgs bundles the inputs shared by normal and dry-run
+// signed-upload pushes.
+type sitePushUploadArgs struct {
 	siteName     string
 	agentID      string
 	message      string
 	partial      bool
 	archiveBytes []byte
+	fileCount    int
 }
 
-// postSitePushDryRun keeps the legacy multipart call for --dry-run.
-// Dry-run inspects the archive without touching Gitea/storage, so it
-// doesn't need the new signed-URL flow.
+// postSitePushDryRun uses the same signed init/upload/finalize path as
+// real pushes, but marks both API calls as dry_run so the server reports
+// the diff without triggering a build.
 func postSitePushDryRun(
-	ctx *auth.Context, args dryRunArgs,
+	ctx *auth.Context, args sitePushUploadArgs,
 ) (*api.SitePushDryRunResponse, error) {
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
-	_ = writer.WriteField("site_name", args.siteName)
-	_ = writer.WriteField("agent_id", args.agentID)
-	_ = writer.WriteField("message", args.message)
-	if args.partial {
-		_ = writer.WriteField("partial", "true")
-	}
-	part, err := writer.CreateFormFile("archive", "archive.tar.gz")
+	initResp, err := postSitePushInit(ctx, api.SitePushInitRequest{
+		SiteName:    args.siteName,
+		AgentID:     args.agentID,
+		ArchiveSize: int64(len(args.archiveBytes)),
+		FileCount:   args.fileCount,
+		Partial:     args.partial,
+		DryRun:      true,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create form file: %w", err)
+		return nil, err
 	}
-	if _, err := part.Write(args.archiveBytes); err != nil {
-		return nil, fmt.Errorf("failed to write archive to form: %w", err)
+	if err := putSiteArchiveToSignedURL(initResp.UploadURL, args.archiveBytes); err != nil {
+		return nil, fmt.Errorf("failed to upload dry-run archive: %w", err)
 	}
-	writer.Close()
+	dryResp, err := postSitePushDryRunFinalize(ctx, api.SitePushFinalizeRequest{
+		AttemptID:   initResp.AttemptID,
+		SiteName:    args.siteName,
+		AgentID:     args.agentID,
+		StagingPath: initResp.StagingPath,
+		Message:     args.message,
+		Partial:     args.partial,
+		DryRun:      true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if dryResp.AttemptID == "" {
+		dryResp.AttemptID = initResp.AttemptID
+	}
+	return dryResp, nil
+}
 
-	endpoint := fmt.Sprintf("%s/api/cli/site/push/dry-run", ctx.APIBaseURL)
-	req, err := http.NewRequest(http.MethodPost, endpoint, &requestBody)
+func postSitePushDryRunFinalize(
+	ctx *auth.Context, body api.SitePushFinalizeRequest,
+) (*api.SitePushDryRunResponse, error) {
+	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("marshal dry-run finalize request: %w", err)
+	}
+	req, err := http.NewRequest(
+		http.MethodPost,
+		ctx.APIBaseURL+"/api/cli/site/push/dry-run",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build dry-run finalize request: %w", err)
 	}
 	ctx.SetAuthHeaders(req)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Kindship-CLI-Version", Version)
 
-	client := &http.Client{Timeout: 300 * time.Second}
+	client := &http.Client{Timeout: 6 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to push files: %w", err)
+		return nil, fmt.Errorf("POST site push dry-run finalize: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, fmt.Errorf("read dry-run finalize response: %w", err)
 	}
 	if err := handleNonJSONResponse(resp.StatusCode, respBody); err != nil {
 		return nil, fmt.Errorf("dry-run failed: %w", err)
