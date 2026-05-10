@@ -239,23 +239,28 @@ func TestPostSitePushInitReportsNonJSON413(t *testing.T) {
 
 func TestFetchAndRenderSitePushStatus(t *testing.T) {
 	var sawID string
+	var sawAgentID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/cli/site/push/status" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		sawID = r.URL.Query().Get("id")
+		sawAgentID = r.URL.Query().Get("agent_id")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"attempt":{"attempt_id":"attempt-xyz","site_name":"demo-site","status":"failed","error_code":"ARCHIVE_TOO_LARGE","error":"archive exceeded limit","archive_size":1024,"files_archived":3,"dry_run":true}}`))
 	}))
 	defer server.Close()
 
-	ctx := &auth.Context{Method: auth.AuthMethodServiceKey, Token: "sk", APIBaseURL: server.URL}
+	ctx := &auth.Context{Method: auth.AuthMethodOAuth, Token: "sk", AgentID: "agent-abc", APIBaseURL: server.URL}
 	resp, err := fetchSitePushStatus(ctx, "attempt-xyz")
 	if err != nil {
 		t.Fatalf("fetchSitePushStatus returned error: %v", err)
 	}
 	if sawID != "attempt-xyz" {
 		t.Fatalf("expected id query, got %q", sawID)
+	}
+	if sawAgentID != "agent-abc" {
+		t.Fatalf("expected agent_id query, got %q", sawAgentID)
 	}
 
 	output := captureStdout(t, func() {

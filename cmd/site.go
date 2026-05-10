@@ -1035,7 +1035,12 @@ func runSitePushStatus(cmd *cobra.Command, args []string) error {
 }
 
 func fetchSitePushStatus(ctx *auth.Context, attemptID string) (*api.SitePushStatusResponse, error) {
-	endpoint := fmt.Sprintf("%s/api/cli/site/push/status?id=%s", ctx.APIBaseURL, url.QueryEscape(attemptID))
+	query := url.Values{}
+	query.Set("id", attemptID)
+	if ctx.AgentID != "" {
+		query.Set("agent_id", ctx.AgentID)
+	}
+	endpoint := fmt.Sprintf("%s/api/cli/site/push/status?%s", ctx.APIBaseURL, query.Encode())
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create push status request: %w", err)
