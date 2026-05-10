@@ -16,12 +16,28 @@ type SiteInfo struct {
 }
 
 // SiteBuild represents build info from the status endpoint
+type SiteBuildError struct {
+	Type      string `json:"type"`
+	Message   string `json:"message"`
+	IsWarning bool   `json:"is_warning"`
+}
+
 type SiteBuild struct {
-	Number     int    `json:"number"`
-	Status     string `json:"status"`
-	Commit     string `json:"commit"`
-	StartedAt  int64  `json:"started_at"`
-	FinishedAt int64  `json:"finished_at"`
+	Number     int              `json:"number"`
+	Status     string           `json:"status"`
+	Commit     string           `json:"commit"`
+	StartedAt  int64            `json:"started_at"`
+	FinishedAt int64            `json:"finished_at"`
+	Errors     []SiteBuildError `json:"errors,omitempty"`
+}
+
+// ServedDeploy describes what the web host is currently known to serve.
+type ServedDeploy struct {
+	CommitSha       *string `json:"commit_sha"`
+	DeployedAt      *string `json:"deployed_at"`
+	Status          string  `json:"status"`
+	ContainerStatus *string `json:"container_status"`
+	Error           *string `json:"error"`
 }
 
 // SiteBuildStep represents a single step in build logs
@@ -49,6 +65,7 @@ type SiteListResponse struct {
 type SiteStatusResponse struct {
 	Site              *SiteInfo        `json:"site,omitempty"`
 	Build             *SiteBuild       `json:"build"`
+	ServedDeploy      *ServedDeploy    `json:"served_deploy,omitempty"`
 	LatestPushAttempt *SitePushAttempt `json:"latest_push_attempt,omitempty"`
 	Error             string           `json:"error,omitempty"`
 }

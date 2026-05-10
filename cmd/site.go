@@ -990,12 +990,21 @@ func runSiteStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Site: %s\n", site.SiteName)
 	fmt.Printf("  Domain:  %s\n", site.Domain)
 	fmt.Printf("  Status:  %s\n", site.Status)
+	if served := statusResp.ServedDeploy; served != nil {
+		fmt.Printf("  Served:  %s\n", servedDeployLabel(served))
+		if served.Error != nil && *served.Error != "" {
+			fmt.Printf("  Served error: %s\n", *served.Error)
+		}
+	}
 	if statusResp.Build != nil {
 		b := statusResp.Build
 		age := formatRelativeTimestamp(b.FinishedAt)
-		fmt.Printf("  Build:   #%d %s (%s)\n", b.Number, b.Status, age)
+		fmt.Printf("  Latest build: #%d %s (%s)\n", b.Number, b.Status, age)
+		if message := preferredBuildErrorMessage(b.Errors); message != "" {
+			fmt.Printf("  Build error: %s\n", message)
+		}
 	} else {
-		fmt.Printf("  Build:   none\n")
+		fmt.Printf("  Latest build: none\n")
 	}
 	if site.CustomDomain != nil {
 		fmt.Printf("  Custom:  %s\n", *site.CustomDomain)
@@ -2188,6 +2197,50 @@ func formatRelativeTimestamp(unixTimestamp int64) string {
 	}
 	t := time.Unix(unixTimestamp, 0)
 	return formatDuration(time.Since(t))
+}
+
+func shortCommit(commit string) string {
+	if len(commit) <= 8 {
+		return commit
+	}
+	return commit[:8]
+}
+
+func preferredBuildErrorMessage(errors []api.SiteBuildError) string {
+	var warning string
+	for _, buildError := range errors {
+		if buildError.Message == "" {
+			continue
+		}
+		if !buildError.IsWarning {
+			return buildError.Message
+		}
+		if warning == "" {
+			warning = buildError.Message
+		}
+	}
+	return warning
+}
+
+func servedDeployLabel(served *api.ServedDeploy) string {
+	if served == nil {
+		return ""
+	}
+
+	label := served.Status
+	if served.CommitSha != nil {
+		label = shortCommit(*served.CommitSha)
+	}
+	if label == "" {
+		label = "unknown"
+	}
+	if served.DeployedAt != nil {
+		label = fmt.Sprintf("%s (%s)", label, formatRelativeTime(*served.DeployedAt))
+	}
+	if served.ContainerStatus != nil && *served.ContainerStatus != "" {
+		label = fmt.Sprintf("%s, %s", label, *served.ContainerStatus)
+	}
+	return label
 }
 
 // renderDryRun prints a human-friendly summary of what a push would

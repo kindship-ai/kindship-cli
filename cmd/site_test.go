@@ -120,6 +120,39 @@ func TestEnsureLocalSiteWorkspacePreservesExistingFiles(t *testing.T) {
 	}
 }
 
+func TestPreferredBuildErrorMessagePrefersNonWarning(t *testing.T) {
+	got := preferredBuildErrorMessage([]api.SiteBuildError{
+		{Message: "cache warning", IsWarning: true},
+		{Message: "could not load config from forge: context deadline exceeded"},
+	})
+
+	if want := "could not load config from forge: context deadline exceeded"; got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestPreferredBuildErrorMessageFallsBackToWarning(t *testing.T) {
+	got := preferredBuildErrorMessage([]api.SiteBuildError{
+		{Message: "cache warning", IsWarning: true},
+	})
+
+	if want := "cache warning"; got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestServedDeployLabelRendersStatusWithoutCommit(t *testing.T) {
+	containerStatus := "running"
+	got := servedDeployLabel(&api.ServedDeploy{
+		Status:          "active",
+		ContainerStatus: &containerStatus,
+	})
+
+	if want := "active, running"; got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
 func TestPostSitePushFinalizePropagatesAttemptFields(t *testing.T) {
 	var got map[string]any
 	var server *httptest.Server
