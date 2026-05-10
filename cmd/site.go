@@ -1152,6 +1152,7 @@ func printAcceptedPushOutcome(resp api.SitePushResponse, statusResp *api.SiteSta
 func applyAttemptToPushResponse(resp *api.SitePushResponse, a *api.SitePushAttempt) {
 	resp.Status = a.Status
 	resp.ErrorCode = a.ErrorCode
+	resp.Error = a.Error
 	resp.CommitSha = a.CommitSha
 	resp.FilesPushed = a.FilesPushed
 	resp.BuildNumber = a.BuildNumber
@@ -1159,6 +1160,9 @@ func applyAttemptToPushResponse(resp *api.SitePushResponse, a *api.SitePushAttem
 	resp.BuildCommit = a.BuildCommit
 	resp.BuildStartedAt = a.BuildStartedAt
 	resp.BuildFinishedAt = a.BuildFinishedAt
+	if a.Status == "succeeded" {
+		resp.Message = "Push reconciled and build succeeded."
+	}
 }
 
 func reconcileAcceptedPush(ctx *auth.Context, siteName, agentID string, resp *api.SitePushResponse) (*api.SiteStatusResponse, error) {
