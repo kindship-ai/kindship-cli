@@ -24,7 +24,7 @@ import (
 var userMessagingCmd = &cobra.Command{
 	Use:     "user-messaging",
 	Aliases: []string{"um"},
-	Short:   "Send messages to the user (ask, choice, approve, report)",
+	Short:   "Send messages to the user (ask, choice, approve, report, voice, video)",
 	Long: `User Messaging is how you — the agent — communicate with the user:
 asking questions, proposing choices, requesting approval, and reporting
 results.
@@ -46,6 +46,8 @@ Subcommands:
   choice     Pick one of N options
   approve    Yes/no approval on a proposed action
   report     One-way status update (user sees, doesn't need to respond)
+  voice      Send a playable voice note
+  video      Send a playable video
   status     Fetch a single message by id
   list       List messages for the current agent
   remind     Nudge a pending message (push a fresh notification)
@@ -65,6 +67,9 @@ var (
 	umUrgency             string   // ambient | daily | urgent | critical
 	umTldr                string   // ≤140-char subject
 	umOnAnswer            string   // ≤2KB self-reminder for context-free pickup
+	umMediaURL            string
+	umMediaMimeType       string
+	umTelegramOnly        bool
 	umListStatus          string
 	umListAgency          string
 	umListLimit           int
@@ -93,6 +98,7 @@ func runUserMessagingAsk(_ *cobra.Command, args []string) error {
 		Urgency:      umUrgency,
 		Tldr:         umTldr,
 		OnAnswerNote: umOnAnswer,
+		TelegramOnly: umTelegramOnly,
 	})
 }
 
@@ -126,6 +132,7 @@ func runUserMessagingChoice(_ *cobra.Command, args []string) error {
 		Urgency:      umUrgency,
 		Tldr:         umTldr,
 		OnAnswerNote: umOnAnswer,
+		TelegramOnly: umTelegramOnly,
 	})
 }
 
@@ -147,6 +154,7 @@ func runUserMessagingApprove(_ *cobra.Command, args []string) error {
 		Urgency:      umUrgency,
 		Tldr:         umTldr,
 		OnAnswerNote: umOnAnswer,
+		TelegramOnly: umTelegramOnly,
 	})
 }
 
@@ -168,6 +176,69 @@ func runUserMessagingReport(_ *cobra.Command, args []string) error {
 		Urgency:      umUrgency,
 		Tldr:         umTldr,
 		OnAnswerNote: umOnAnswer,
+		TelegramOnly: umTelegramOnly,
+	})
+}
+
+// ---- voice ----
+
+var userMessagingVoiceCmd = &cobra.Command{
+	Use:   "voice <caption...>",
+	Short: "Send a playable voice note",
+	Long: `Send a playable voice note to the user.
+
+The media URL must be HTTPS and point to OGG/OPUS audio so Telegram can render
+it as a voice-note player. The caption remains visible in the web Inbox.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runUserMessagingVoice,
+}
+
+func runUserMessagingVoice(_ *cobra.Command, args []string) error {
+	if umMediaURL == "" {
+		return fmt.Errorf("--media-url is required for voice")
+	}
+	return sendUserMessage(api.UserMessagingSendRequest{
+		Type:          "voice",
+		Agency:        umAgency,
+		Body:          strings.Join(args, " "),
+		Title:         umTitle,
+		Urgency:       umUrgency,
+		Tldr:          umTldr,
+		OnAnswerNote:  umOnAnswer,
+		MediaURL:      umMediaURL,
+		MediaMimeType: umMediaMimeType,
+		TelegramOnly:  umTelegramOnly,
+	})
+}
+
+// ---- video ----
+
+var userMessagingVideoCmd = &cobra.Command{
+	Use:   "video <caption...>",
+	Short: "Send a playable video",
+	Long: `Send a playable video to the user.
+
+The media URL must be HTTPS and point to an MP4 so Telegram can render it as
+native video media. The caption and player also appear in the web Inbox.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runUserMessagingVideo,
+}
+
+func runUserMessagingVideo(_ *cobra.Command, args []string) error {
+	if umMediaURL == "" {
+		return fmt.Errorf("--media-url is required for video")
+	}
+	return sendUserMessage(api.UserMessagingSendRequest{
+		Type:          "video",
+		Agency:        umAgency,
+		Body:          strings.Join(args, " "),
+		Title:         umTitle,
+		Urgency:       umUrgency,
+		Tldr:          umTldr,
+		OnAnswerNote:  umOnAnswer,
+		MediaURL:      umMediaURL,
+		MediaMimeType: umMediaMimeType,
+		TelegramOnly:  umTelegramOnly,
 	})
 }
 
@@ -223,6 +294,9 @@ func sendUserMessage(req api.UserMessagingSendRequest) error {
 	}
 	if n := len([]rune(req.Title)); n > 200 {
 		return fmt.Errorf("--title too long: %d chars (max 200)", n)
+	}
+	if req.TelegramOnly && (req.Type == "voice" || req.Type == "video") && req.Urgency == "" {
+		req.Urgency = "daily"
 	}
 	ctx, err := auth.GetAuthContext()
 	if err != nil {
@@ -389,6 +463,13 @@ func runUserMessagingStatus(_ *cobra.Command, args []string) error {
 	case "pending":
 		fmt.Printf("  reminders: %d\n", row.ReminderCount)
 	}
+	if row.MediaURL != nil && *row.MediaURL != "" {
+		kind := ""
+		if row.MediaKind != nil {
+			kind = *row.MediaKind
+		}
+		fmt.Printf("  media:    %s %s\n", kind, *row.MediaURL)
+	}
 	return nil
 }
 
@@ -481,6 +562,13 @@ func runUserMessagingList(_ *cobra.Command, _ []string) error {
 				note = note[:177] + "..."
 			}
 			line += fmt.Sprintf("  ⟵ on-answer: %s", note)
+		}
+		if m.MediaURL != nil && *m.MediaURL != "" {
+			kind := "media"
+			if m.MediaKind != nil && *m.MediaKind != "" {
+				kind = *m.MediaKind
+			}
+			line += fmt.Sprintf("  ⟵ %s: %s", kind, *m.MediaURL)
 		}
 		fmt.Println(line)
 	}
@@ -806,6 +894,8 @@ func init() {
 		userMessagingChoiceCmd,
 		userMessagingApproveCmd,
 		userMessagingReportCmd,
+		userMessagingVoiceCmd,
+		userMessagingVideoCmd,
 	} {
 		c.Flags().StringVar(&umAgency, "agency", "", "One of your 12 agencies (or 'other') — the agent's domain of autonomy this message belongs to")
 		c.Flags().StringVar(&umTitle, "title", "", "Optional short title")
@@ -813,9 +903,14 @@ func init() {
 		c.Flags().StringVar(&umUrgency, "urgency", "", "Urgency label: ambient | daily (default) | urgent | critical. Phase B: metadata + push subject only. Phase C: routing (bundled daily dispatch, quiet-hours hold, wake-override).")
 		c.Flags().StringVar(&umTldr, "tldr", "", "Optional ≤140-char subject. Used as the push/email/telegram subject and the web card heading. Falls back to title, then body snippet.")
 		c.Flags().StringVar(&umOnAnswer, "on-answer", "", "Optional self-reminder (≤2KB) surfaced alongside the answered row on your next heartbeat so you can resume context-free. Cue format suggestion: 'resume <ROADMAP item> / reread <file> / follow up with <…>'.")
+		c.Flags().BoolVar(&umTelegramOnly, "telegram-only", false, "Deliver only through Telegram notification fan-out while still recording the row for the web Inbox.")
 		c.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	}
 	userMessagingChoiceCmd.Flags().StringArrayVar(&umChoiceOption, "option", nil, "--option value:label (repeatable; minimum 2)")
+	for _, c := range []*cobra.Command{userMessagingVoiceCmd, userMessagingVideoCmd} {
+		c.Flags().StringVar(&umMediaURL, "media-url", "", "HTTPS URL to playable media.")
+		c.Flags().StringVar(&umMediaMimeType, "media-mime-type", "", "Optional MIME type hint (voice: audio/ogg, video: video/mp4).")
+	}
 
 	userMessagingStatusCmd.Flags().BoolVar(&umJSON, "json", false, "JSON output")
 	userMessagingListCmd.Flags().StringVar(&umListStatus, "status", "", "Filter by status (pending|answered|acknowledged|retracted|expired)")
@@ -837,6 +932,8 @@ func init() {
 		userMessagingChoiceCmd,
 		userMessagingApproveCmd,
 		userMessagingReportCmd,
+		userMessagingVoiceCmd,
+		userMessagingVideoCmd,
 		userMessagingStatusCmd,
 		userMessagingListCmd,
 		userMessagingRemindCmd,

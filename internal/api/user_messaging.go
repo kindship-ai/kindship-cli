@@ -41,9 +41,13 @@ type UserMessage struct {
 	DispositionNote *string             `json:"disposition_note"`
 	// Phase B engagement fields. Server default for Urgency is 'daily';
 	// older servers may omit the field entirely.
-	Urgency      string  `json:"urgency,omitempty"`
-	Tldr         *string `json:"tldr,omitempty"`
-	OnAnswerNote *string `json:"on_answer_note,omitempty"`
+	Urgency       string  `json:"urgency,omitempty"`
+	Tldr          *string `json:"tldr,omitempty"`
+	OnAnswerNote  *string `json:"on_answer_note,omitempty"`
+	MediaKind     *string `json:"media_kind,omitempty"`
+	MediaURL      *string `json:"media_url,omitempty"`
+	MediaMimeType *string `json:"media_mime_type,omitempty"`
+	TelegramOnly  bool    `json:"telegram_only,omitempty"`
 }
 
 type UserMessagingDisposeRequest struct {
@@ -62,7 +66,7 @@ type UserMessagingDisposeResponse struct {
 
 type UserMessagingSendRequest struct {
 	AgentID          string              `json:"agent_id"`
-	Type             string              `json:"type"` // question | choice | approval | report
+	Type             string              `json:"type"` // question | choice | approval | report | voice | video
 	Agency           string              `json:"agency"`
 	Body             string              `json:"body"`
 	Title            string              `json:"title,omitempty"`
@@ -74,9 +78,12 @@ type UserMessagingSendRequest struct {
 	// 'daily' when omitted. Tldr caps at 140 chars server-side, OnAnswerNote
 	// at 2048 chars. Sent as strings here — zero-value strings get dropped
 	// via omitempty so older server versions tolerate the request.
-	Urgency      string `json:"urgency,omitempty"` // ambient | daily | urgent | critical
-	Tldr         string `json:"tldr,omitempty"`
-	OnAnswerNote string `json:"on_answer_note,omitempty"`
+	Urgency       string `json:"urgency,omitempty"` // ambient | daily | urgent | critical
+	Tldr          string `json:"tldr,omitempty"`
+	OnAnswerNote  string `json:"on_answer_note,omitempty"`
+	MediaURL      string `json:"media_url,omitempty"`
+	MediaMimeType string `json:"media_mime_type,omitempty"`
+	TelegramOnly  bool   `json:"telegram_only,omitempty"`
 }
 
 // ValidationIssue mirrors a single Zod issue returned by the server when a
@@ -110,6 +117,7 @@ type UserMessagingSendResponse struct {
 	Urgency             string  `json:"urgency,omitempty"`
 	DeliveryPolicy      string  `json:"delivery_policy,omitempty"`
 	EstimatedDeliveryAt *string `json:"estimated_delivery_at,omitempty"`
+	TelegramOnly        bool    `json:"telegram_only,omitempty"`
 }
 
 type UserMessagingListResponse struct {
