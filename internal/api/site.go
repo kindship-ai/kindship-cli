@@ -254,6 +254,7 @@ type SiteAnalyticsSite struct {
 	Domain             string  `json:"domain"`
 	CustomDomain       *string `json:"custom_domain"`
 	AnalyticsWebsiteID string  `json:"analytics_website_id"`
+	AnalyticsScriptURL *string `json:"analytics_script_url,omitempty"`
 }
 
 // SiteAnalyticsRange describes the exact time window queried.
@@ -288,4 +289,32 @@ type SiteAnalyticsMetricsResponse struct {
 	Limit   int           `json:"limit"`
 	Metrics []interface{} `json:"metrics"`
 	Error   string        `json:"error,omitempty"`
+}
+
+// SiteAnalyticsEventsResponse is the response from
+// GET /api/cli/site/analytics/events.
+type SiteAnalyticsEventsResponse struct {
+	SiteAnalyticsContext
+	Limit      int                    `json:"limit"`
+	EventStats map[string]interface{} `json:"event_stats"`
+	Events     []interface{}          `json:"events"`
+	Error      string                 `json:"error,omitempty"`
+}
+
+// SiteAnalyticsEventDataResponse is the response from
+// GET /api/cli/site/analytics/event-data.
+type SiteAnalyticsEventDataResponse struct {
+	SiteAnalyticsContext
+	Event     *string       `json:"event"`
+	Property  *string       `json:"property"`
+	EventData []interface{} `json:"event_data"`
+	Error     string        `json:"error,omitempty"`
+}
+
+// SiteAnalyticsHealthResponse is the response from
+// GET /api/cli/site/analytics/health.
+type SiteAnalyticsHealthResponse struct {
+	SiteAnalyticsContext
+	Health map[string]interface{} `json:"health"`
+	Error  string                 `json:"error,omitempty"`
 }

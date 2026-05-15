@@ -141,6 +141,8 @@ Umami credentials.
 Examples:
   kindship site analytics my-app
   kindship site analytics my-app --range 30d --metric referrer
+  kindship site analytics my-app --report
+  kindship site analytics my-app --events --event-data
   kindship site analytics my-app --format json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSiteAnalytics,
@@ -262,19 +264,24 @@ Examples:
 }
 
 var (
-	siteFormat      string
-	pushDir         string
-	pushMessage     string
-	pushOnly        []string
-	pushDryRun      bool
-	pushWait        bool
-	pushWaitTimeout int
-	logsBuild       int
-	verifyRoute     string
-	analyticsRange  string
-	analyticsUnit   string
-	analyticsMetric string
-	analyticsLimit  int
+	siteFormat         string
+	pushDir            string
+	pushMessage        string
+	pushOnly           []string
+	pushDryRun         bool
+	pushWait           bool
+	pushWaitTimeout    int
+	logsBuild          int
+	verifyRoute        string
+	analyticsRange     string
+	analyticsUnit      string
+	analyticsMetric    string
+	analyticsLimit     int
+	analyticsEvents    bool
+	analyticsEventData bool
+	analyticsReport    bool
+	analyticsEvent     string
+	analyticsProperty  string
 )
 
 const containerSiteWorkspaceRoot = "/workspace/sites"
@@ -302,6 +309,11 @@ func init() {
 	siteAnalyticsCmd.Flags().StringVar(&analyticsUnit, "unit", "", "Time bucket unit (hour, day, month). Defaults from range")
 	siteAnalyticsCmd.Flags().StringVar(&analyticsMetric, "metric", "path", "Metric dimension (path, referrer, country, browser, device, event)")
 	siteAnalyticsCmd.Flags().IntVar(&analyticsLimit, "limit", 20, "Number of metric rows to return (1-500)")
+	siteAnalyticsCmd.Flags().BoolVar(&analyticsEvents, "events", false, "Include custom event statistics and top events")
+	siteAnalyticsCmd.Flags().BoolVar(&analyticsEventData, "event-data", false, "Include event data property/value coverage")
+	siteAnalyticsCmd.Flags().BoolVar(&analyticsReport, "report", false, "Print a lifecycle report with health, events, and next actions")
+	siteAnalyticsCmd.Flags().StringVar(&analyticsEvent, "event", "", "Custom event name filter for event-data")
+	siteAnalyticsCmd.Flags().StringVar(&analyticsProperty, "property", "", "Event data property filter for event-data values (requires --event)")
 
 	siteVerifyCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteVerifyCmd.Flags().StringVar(&verifyRoute, "route", "", "Optional relative route to GET (e.g. /about). Reports route_status separately from edge / sitemap.")
@@ -1596,15 +1608,23 @@ func runSiteLogs(cmd *cobra.Command, args []string) error {
 }
 
 type siteAnalyticsCombinedResponse struct {
-	Site    api.SiteAnalyticsSite  `json:"site"`
-	Range   api.SiteAnalyticsRange `json:"range"`
-	Summary map[string]interface{} `json:"summary"`
-	Metric  string                 `json:"metric"`
-	Limit   int                    `json:"limit"`
-	Metrics []interface{}          `json:"metrics"`
+	Site      api.SiteAnalyticsSite               `json:"site"`
+	Range     api.SiteAnalyticsRange              `json:"range"`
+	Summary   map[string]interface{}              `json:"summary"`
+	Metric    string                              `json:"metric"`
+	Limit     int                                 `json:"limit"`
+	Metrics   []interface{}                       `json:"metrics"`
+	Events    *api.SiteAnalyticsEventsResponse    `json:"events,omitempty"`
+	EventData *api.SiteAnalyticsEventDataResponse `json:"event_data,omitempty"`
+	Health    *api.SiteAnalyticsHealthResponse    `json:"health,omitempty"`
 }
 
 func runSiteAnalytics(cmd *cobra.Command, args []string) error {
+	siteName := args[0]
+	if analyticsProperty != "" && analyticsEvent == "" {
+		return fmt.Errorf("--property requires --event")
+	}
+
 	ctx, err := auth.GetAuthContext()
 	if err != nil {
 		return err
@@ -1615,7 +1635,6 @@ func runSiteAnalytics(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	siteName := args[0]
 	summaryResp, err := fetchSiteAnalyticsSummary(ctx, siteName, agentID)
 	if err != nil {
 		return err
@@ -1635,8 +1654,36 @@ func runSiteAnalytics(cmd *cobra.Command, args []string) error {
 		Metrics: metricsResp.Metrics,
 	}
 
+	if analyticsEvents || analyticsReport {
+		eventsResp, err := fetchSiteAnalyticsEvents(ctx, siteName, agentID)
+		if err != nil {
+			return err
+		}
+		output.Events = eventsResp
+	}
+
+	if analyticsEventData || analyticsReport {
+		eventDataResp, err := fetchSiteAnalyticsEventData(ctx, siteName, agentID)
+		if err != nil {
+			return err
+		}
+		output.EventData = eventDataResp
+	}
+
+	if analyticsReport {
+		healthResp, err := fetchSiteAnalyticsHealth(ctx, siteName, agentID)
+		if err != nil {
+			return err
+		}
+		output.Health = healthResp
+	}
+
 	if siteFormat == "json" {
 		return printJSON(output)
+	}
+
+	if analyticsReport {
+		return renderSiteAnalyticsReport(output)
 	}
 
 	return renderSiteAnalytics(output)
@@ -1659,6 +1706,43 @@ func fetchSiteAnalyticsMetrics(ctx *auth.Context, siteName, agentID string) (*ap
 	var out api.SiteAnalyticsMetricsResponse
 	if err := fetchSiteAnalyticsEndpoint(ctx, "/api/cli/site/analytics/metrics", query, &out); err != nil {
 		return nil, fmt.Errorf("failed to get site analytics metrics: %w", err)
+	}
+	return &out, nil
+}
+
+func fetchSiteAnalyticsEvents(ctx *auth.Context, siteName, agentID string) (*api.SiteAnalyticsEventsResponse, error) {
+	query := siteAnalyticsBaseQuery(siteName, agentID)
+	query.Set("limit", fmt.Sprintf("%d", analyticsLimit))
+
+	var out api.SiteAnalyticsEventsResponse
+	if err := fetchSiteAnalyticsEndpoint(ctx, "/api/cli/site/analytics/events", query, &out); err != nil {
+		return nil, fmt.Errorf("failed to get site analytics events: %w", err)
+	}
+	return &out, nil
+}
+
+func fetchSiteAnalyticsEventData(ctx *auth.Context, siteName, agentID string) (*api.SiteAnalyticsEventDataResponse, error) {
+	query := siteAnalyticsBaseQuery(siteName, agentID)
+	if analyticsEvent != "" {
+		query.Set("event", analyticsEvent)
+	}
+	if analyticsProperty != "" {
+		query.Set("property", analyticsProperty)
+	}
+
+	var out api.SiteAnalyticsEventDataResponse
+	if err := fetchSiteAnalyticsEndpoint(ctx, "/api/cli/site/analytics/event-data", query, &out); err != nil {
+		return nil, fmt.Errorf("failed to get site analytics event data: %w", err)
+	}
+	return &out, nil
+}
+
+func fetchSiteAnalyticsHealth(ctx *auth.Context, siteName, agentID string) (*api.SiteAnalyticsHealthResponse, error) {
+	query := siteAnalyticsBaseQuery(siteName, agentID)
+
+	var out api.SiteAnalyticsHealthResponse
+	if err := fetchSiteAnalyticsEndpoint(ctx, "/api/cli/site/analytics/health", query, &out); err != nil {
+		return nil, fmt.Errorf("failed to get site analytics health: %w", err)
 	}
 	return &out, nil
 }
@@ -1717,16 +1801,17 @@ func fetchSiteAnalyticsEndpoint[T any](ctx *auth.Context, path string, query url
 }
 
 func renderSiteAnalytics(resp siteAnalyticsCombinedResponse) error {
+	summary := analyticsStatsMap(resp.Summary)
 	fmt.Printf("Site analytics: %s\n", resp.Site.SiteName)
 	fmt.Printf("  Domain:  %s\n", resp.Site.Domain)
 	fmt.Printf("  Range:   %s (%s)\n", resp.Range.Range, resp.Range.Unit)
 	fmt.Printf("  Window:  %s to %s\n", formatAnalyticsMs(resp.Range.StartAt), formatAnalyticsMs(resp.Range.EndAt))
 
-	if len(resp.Summary) > 0 {
-		fmt.Printf("  Visitors:  %s\n", formatAnalyticsNumber(resp.Summary["visitors"]))
-		fmt.Printf("  Visits:    %s\n", formatAnalyticsNumber(resp.Summary["visits"]))
-		fmt.Printf("  Pageviews: %s\n", formatAnalyticsNumber(resp.Summary["pageviews"]))
-		fmt.Printf("  Bounces:   %s\n", formatAnalyticsNumber(resp.Summary["bounces"]))
+	if len(summary) > 0 {
+		fmt.Printf("  Visitors:  %s\n", formatAnalyticsNumber(summary["visitors"]))
+		fmt.Printf("  Visits:    %s\n", formatAnalyticsNumber(summary["visits"]))
+		fmt.Printf("  Pageviews: %s\n", formatAnalyticsNumber(summary["pageviews"]))
+		fmt.Printf("  Bounces:   %s\n", formatAnalyticsNumber(summary["bounces"]))
 	}
 
 	if len(resp.Metrics) == 0 {
@@ -1739,6 +1824,88 @@ func renderSiteAnalytics(resp siteAnalyticsCombinedResponse) error {
 		label, value := analyticsMetricLabelAndValue(row)
 		fmt.Printf("  %-40s %s\n", label, value)
 	}
+
+	if resp.Events != nil {
+		eventStats := analyticsStatsMap(resp.Events.EventStats)
+		fmt.Printf("\nEvents\n")
+		fmt.Printf("  Total events: %s\n", formatAnalyticsNumber(eventStats["events"]))
+		fmt.Printf("  Unique events: %s\n", formatAnalyticsNumber(eventStats["uniqueEvents"]))
+		for _, row := range resp.Events.Events {
+			label, value := analyticsMetricLabelAndValue(row)
+			fmt.Printf("  %-40s %s\n", label, value)
+		}
+	}
+
+	if resp.EventData != nil {
+		fmt.Printf("\nEvent data\n")
+		renderAnalyticsRows(resp.EventData.EventData)
+	}
+	return nil
+}
+
+func renderSiteAnalyticsReport(resp siteAnalyticsCombinedResponse) error {
+	summary := analyticsStatsMap(resp.Summary)
+	fmt.Printf("Site analytics report: %s\n", resp.Site.SiteName)
+	fmt.Printf("  Domain:  %s\n", resp.Site.Domain)
+	fmt.Printf("  Range:   %s (%s)\n", resp.Range.Range, resp.Range.Unit)
+	fmt.Printf("  Window:  %s to %s\n", formatAnalyticsMs(resp.Range.StartAt), formatAnalyticsMs(resp.Range.EndAt))
+	fmt.Printf("\nTraffic\n")
+	fmt.Printf("  Visitors:  %s\n", formatAnalyticsNumber(summary["visitors"]))
+	fmt.Printf("  Visits:    %s\n", formatAnalyticsNumber(summary["visits"]))
+	fmt.Printf("  Pageviews: %s\n", formatAnalyticsNumber(summary["pageviews"]))
+
+	fmt.Printf("\nAcquisition / engagement\n")
+	if len(resp.Metrics) == 0 {
+		fmt.Printf("  No %s metrics found.\n", resp.Metric)
+	} else {
+		for _, row := range resp.Metrics {
+			label, value := analyticsMetricLabelAndValue(row)
+			fmt.Printf("  %-40s %s\n", label, value)
+		}
+	}
+
+	fmt.Printf("\nConversions / events\n")
+	if resp.Events == nil || len(resp.Events.Events) == 0 {
+		fmt.Printf("  No custom events found in this range.\n")
+	} else {
+		eventStats := analyticsStatsMap(resp.Events.EventStats)
+		fmt.Printf("  Total events: %s\n", formatAnalyticsNumber(eventStats["events"]))
+		fmt.Printf("  Unique events: %s\n", formatAnalyticsNumber(eventStats["uniqueEvents"]))
+		renderAnalyticsRows(resp.Events.Events)
+	}
+
+	if resp.EventData != nil {
+		fmt.Printf("\nEvent data coverage\n")
+		renderAnalyticsRows(resp.EventData.EventData)
+	}
+
+	if resp.Health != nil {
+		fmt.Printf("\nHealth\n")
+		if ok, _ := resp.Health.Health["ok"].(bool); ok {
+			fmt.Printf("  OK: yes\n")
+		} else {
+			fmt.Printf("  OK: no\n")
+		}
+		if checkedURL, _ := resp.Health.Health["checked_url"].(string); checkedURL != "" {
+			fmt.Printf("  Checked URL: %s\n", checkedURL)
+		}
+		if warnings, ok := resp.Health.Health["warnings"].([]interface{}); ok && len(warnings) > 0 {
+			fmt.Printf("  Warnings:\n")
+			for _, warning := range warnings {
+				fmt.Printf("    - %v\n", warning)
+			}
+		}
+	}
+
+	fmt.Printf("\nNext action\n")
+	if formatAnalyticsNumber(summary["pageviews"]) == "0" {
+		fmt.Printf("  Get measurable traffic before drawing conversion conclusions.\n")
+	} else if resp.Events == nil || len(resp.Events.Events) == 0 {
+		fmt.Printf("  Add explicit CTA or form events, then validate them after the next push.\n")
+	} else {
+		fmt.Printf("  Pick one bottleneck from the top page/referrer/event data and ship one testable site change.\n")
+	}
+
 	return nil
 }
 
@@ -1761,10 +1928,52 @@ func analyticsMetricLabelAndValue(row interface{}) (string, string) {
 	return label, value
 }
 
+func analyticsStatsMap(fields map[string]interface{}) map[string]interface{} {
+	if data, ok := fields["data"].(map[string]interface{}); ok {
+		return data
+	}
+	return fields
+}
+
+func renderAnalyticsRows(rows []interface{}) {
+	if len(rows) == 0 {
+		fmt.Printf("  No rows found.\n")
+		return
+	}
+
+	for _, row := range rows {
+		fields, ok := row.(map[string]interface{})
+		if !ok {
+			fmt.Printf("  %v\n", row)
+			continue
+		}
+
+		label := firstString(fields, "eventName", "propertyName", "value", "x", "name")
+		if label == "" {
+			label = "(unknown)"
+		}
+
+		detail := firstString(fields, "propertyName", "dataType")
+		if eventName := firstString(fields, "eventName"); eventName != "" && eventName != label {
+			detail = eventName
+		}
+
+		value := firstNumber(fields, "total", "y", "count", "events", "records")
+		if detail != "" && detail != label {
+			fmt.Printf("  %-28s %-20s %s\n", label, detail, value)
+		} else {
+			fmt.Printf("  %-40s %s\n", label, value)
+		}
+	}
+}
+
 func firstString(fields map[string]interface{}, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := fields[key].(string); ok && value != "" {
 			return value
+		}
+		if value, ok := fields[key].(float64); ok {
+			return fmt.Sprintf("%.0f", value)
 		}
 	}
 	return ""
@@ -1784,6 +1993,13 @@ func firstNumber(fields map[string]interface{}, keys ...string) string {
 
 func formatAnalyticsNumber(value interface{}) string {
 	switch v := value.(type) {
+	case map[string]interface{}:
+		if nested, ok := v["value"]; ok {
+			return formatAnalyticsNumber(nested)
+		}
+		if nested, ok := v["total"]; ok {
+			return formatAnalyticsNumber(nested)
+		}
 	case float64:
 		return fmt.Sprintf("%.0f", v)
 	case float32:

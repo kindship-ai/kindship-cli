@@ -84,6 +84,7 @@ kindship site create my-app
 kindship site push my-app
 kindship site status my-app
 kindship site analytics my-app
+kindship site analytics my-app --report
 ```
 
 `kindship site create` now bootstraps a local site workspace repo for the agent. By default the workspace lives at:
@@ -94,6 +95,8 @@ kindship site analytics my-app
 
 `kindship site analytics <site-name>` reads Kindship-managed site analytics
 through normal Kindship auth. It does not require direct Umami credentials.
+Use `--report` for the lifecycle view with tracking health, custom events, and
+next-action guidance.
 
 ### Videos
 

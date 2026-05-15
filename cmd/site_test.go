@@ -403,6 +403,8 @@ func TestFetchSiteAnalyticsUsesKindshipAuthAndQuery(t *testing.T) {
 	var sawMetricsAuth string
 	var sawSummaryQuery string
 	var sawMetricsQuery string
+	var sawEventsQuery string
+	var sawEventDataQuery string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -410,11 +412,19 @@ func TestFetchSiteAnalyticsUsesKindshipAuthAndQuery(t *testing.T) {
 		case "/api/cli/site/analytics/summary":
 			sawSummaryAuth = r.Header.Get("Authorization")
 			sawSummaryQuery = r.URL.RawQuery
-			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"summary":{"visitors":3,"visits":4,"pageviews":5,"bounces":1}}`))
+			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"summary":{"visitors":{"value":3},"visits":{"value":4},"pageviews":{"value":5},"bounces":{"value":1}}}`))
 		case "/api/cli/site/analytics/metrics":
 			sawMetricsAuth = r.Header.Get("Authorization")
 			sawMetricsQuery = r.URL.RawQuery
 			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"metric":"referrer","limit":10,"metrics":[{"x":"https://example.com","y":2}]}`))
+		case "/api/cli/site/analytics/events":
+			sawEventsQuery = r.URL.RawQuery
+			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"limit":10,"event_stats":{"data":{"events":{"value":5},"uniqueEvents":{"value":2}}},"events":[{"x":"cta-click","y":3}]}`))
+		case "/api/cli/site/analytics/event-data":
+			sawEventDataQuery = r.URL.RawQuery
+			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"event":"cta-click","property":"placement","event_data":[{"value":"hero","total":2}]}`))
+		case "/api/cli/site/analytics/health":
+			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"health":{"ok":true,"warnings":[]}}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -426,6 +436,16 @@ func TestFetchSiteAnalyticsUsesKindshipAuthAndQuery(t *testing.T) {
 	analyticsUnit = "day"
 	analyticsMetric = "referrer"
 	analyticsLimit = 10
+	analyticsEvent = "cta-click"
+	analyticsProperty = "placement"
+	defer func() {
+		analyticsRange = ""
+		analyticsUnit = ""
+		analyticsMetric = ""
+		analyticsLimit = 0
+		analyticsEvent = ""
+		analyticsProperty = ""
+	}()
 
 	summary, err := fetchSiteAnalyticsSummary(ctx, "demo-site", "agent-1")
 	if err != nil {
@@ -434,6 +454,18 @@ func TestFetchSiteAnalyticsUsesKindshipAuthAndQuery(t *testing.T) {
 	metrics, err := fetchSiteAnalyticsMetrics(ctx, "demo-site", "agent-1")
 	if err != nil {
 		t.Fatalf("fetchSiteAnalyticsMetrics returned error: %v", err)
+	}
+	events, err := fetchSiteAnalyticsEvents(ctx, "demo-site", "agent-1")
+	if err != nil {
+		t.Fatalf("fetchSiteAnalyticsEvents returned error: %v", err)
+	}
+	eventData, err := fetchSiteAnalyticsEventData(ctx, "demo-site", "agent-1")
+	if err != nil {
+		t.Fatalf("fetchSiteAnalyticsEventData returned error: %v", err)
+	}
+	health, err := fetchSiteAnalyticsHealth(ctx, "demo-site", "agent-1")
+	if err != nil {
+		t.Fatalf("fetchSiteAnalyticsHealth returned error: %v", err)
 	}
 
 	if sawSummaryAuth != "Bearer cli-token" || sawMetricsAuth != "Bearer cli-token" {
@@ -452,12 +484,29 @@ func TestFetchSiteAnalyticsUsesKindshipAuthAndQuery(t *testing.T) {
 	if metricValues.Get("metric") != "referrer" || metricValues.Get("limit") != "10" {
 		t.Fatalf("unexpected metrics query values: %#v", metricValues)
 	}
+	eventValues, _ := url.ParseQuery(sawEventsQuery)
+	if eventValues.Get("limit") != "10" {
+		t.Fatalf("unexpected events query values: %#v", eventValues)
+	}
+	eventDataValues, _ := url.ParseQuery(sawEventDataQuery)
+	if eventDataValues.Get("event") != "cta-click" || eventDataValues.Get("property") != "placement" {
+		t.Fatalf("unexpected event-data query values: %#v", eventDataValues)
+	}
 
-	if summary.Summary["pageviews"].(float64) != 5 {
+	if formatAnalyticsNumber(summary.Summary["pageviews"]) != "5" {
 		t.Fatalf("summary did not parse pageviews: %#v", summary.Summary)
 	}
 	if metrics.Metric != "referrer" || len(metrics.Metrics) != 1 {
 		t.Fatalf("metrics did not parse: %#v", metrics)
+	}
+	if formatAnalyticsNumber(analyticsStatsMap(events.EventStats)["events"]) != "5" || len(events.Events) != 1 {
+		t.Fatalf("events did not parse: %#v", events)
+	}
+	if eventData.Event == nil || *eventData.Event != "cta-click" || len(eventData.EventData) != 1 {
+		t.Fatalf("event data did not parse: %#v", eventData)
+	}
+	if health.Health["ok"] != true {
+		t.Fatalf("health did not parse: %#v", health)
 	}
 }
 
@@ -475,15 +524,26 @@ func TestRenderSiteAnalyticsShowsSummaryAndMetrics(t *testing.T) {
 				Unit:    "day",
 			},
 			Summary: map[string]interface{}{
-				"visitors":  float64(3),
-				"visits":    float64(4),
-				"pageviews": float64(5),
-				"bounces":   float64(1),
+				"visitors":  map[string]interface{}{"value": float64(3)},
+				"visits":    map[string]interface{}{"value": float64(4)},
+				"pageviews": map[string]interface{}{"value": float64(5)},
+				"bounces":   map[string]interface{}{"value": float64(1)},
 			},
 			Metric: "path",
 			Limit:  20,
 			Metrics: []interface{}{
 				map[string]interface{}{"x": "/", "y": float64(5)},
+			},
+			Events: &api.SiteAnalyticsEventsResponse{
+				EventStats: map[string]interface{}{
+					"data": map[string]interface{}{
+						"events":       map[string]interface{}{"value": float64(2)},
+						"uniqueEvents": map[string]interface{}{"value": float64(1)},
+					},
+				},
+				Events: []interface{}{
+					map[string]interface{}{"x": "cta-click", "y": float64(2)},
+				},
 			},
 		})
 		if err != nil {
@@ -491,10 +551,24 @@ func TestRenderSiteAnalyticsShowsSummaryAndMetrics(t *testing.T) {
 		}
 	})
 
-	for _, want := range []string{"Site analytics: demo-site", "Visitors:  3", "Pageviews: 5", "Top path", "/"} {
+	for _, want := range []string{"Site analytics: demo-site", "Visitors:  3", "Pageviews: 5", "Top path", "/", "Events", "cta-click"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("rendered output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestRunSiteAnalyticsRejectsPropertyWithoutEvent(t *testing.T) {
+	analyticsProperty = "placement"
+	analyticsEvent = ""
+	defer func() {
+		analyticsProperty = ""
+		analyticsEvent = ""
+	}()
+
+	err := runSiteAnalytics(nil, []string{"demo-site"})
+	if err == nil || !strings.Contains(err.Error(), "--property requires --event") {
+		t.Fatalf("expected property validation error, got %v", err)
 	}
 }
 
