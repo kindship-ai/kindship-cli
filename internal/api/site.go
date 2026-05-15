@@ -239,3 +239,53 @@ type SiteVerifyResponse struct {
 	RouteStatus           *int    `json:"route_status"`
 	Error                 string  `json:"error,omitempty"`
 }
+
+// SiteAnalyticsContext is the shared context returned by analytics endpoints.
+type SiteAnalyticsContext struct {
+	Site  SiteAnalyticsSite  `json:"site"`
+	Range SiteAnalyticsRange `json:"range"`
+}
+
+// SiteAnalyticsSite identifies the Kindship site and its provisioned Umami
+// website without exposing Umami credentials.
+type SiteAnalyticsSite struct {
+	ID                 string  `json:"id"`
+	SiteName           string  `json:"site_name"`
+	Domain             string  `json:"domain"`
+	CustomDomain       *string `json:"custom_domain"`
+	AnalyticsWebsiteID string  `json:"analytics_website_id"`
+}
+
+// SiteAnalyticsRange describes the exact time window queried.
+type SiteAnalyticsRange struct {
+	Range   string `json:"range"`
+	StartAt int64  `json:"start_at"`
+	EndAt   int64  `json:"end_at"`
+	Unit    string `json:"unit"`
+}
+
+// SiteAnalyticsSummaryResponse is the response from
+// GET /api/cli/site/analytics/summary.
+type SiteAnalyticsSummaryResponse struct {
+	SiteAnalyticsContext
+	Summary map[string]interface{} `json:"summary"`
+	Error   string                 `json:"error,omitempty"`
+}
+
+// SiteAnalyticsPageviewsResponse is the response from
+// GET /api/cli/site/analytics/pageviews.
+type SiteAnalyticsPageviewsResponse struct {
+	SiteAnalyticsContext
+	Pageviews interface{} `json:"pageviews"`
+	Error     string      `json:"error,omitempty"`
+}
+
+// SiteAnalyticsMetricsResponse is the response from
+// GET /api/cli/site/analytics/metrics.
+type SiteAnalyticsMetricsResponse struct {
+	SiteAnalyticsContext
+	Metric  string        `json:"metric"`
+	Limit   int           `json:"limit"`
+	Metrics []interface{} `json:"metrics"`
+	Error   string        `json:"error,omitempty"`
+}

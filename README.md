@@ -83,6 +83,7 @@ kindship entity delete <id>
 kindship site create my-app
 kindship site push my-app
 kindship site status my-app
+kindship site analytics my-app
 ```
 
 `kindship site create` now bootstraps a local site workspace repo for the agent. By default the workspace lives at:
@@ -90,6 +91,9 @@ kindship site status my-app
 - local mode: `~/kindship/sites/<site-name>`
 
 `kindship site push <site-name>` deploys from that canonical workspace unless `--dir` is explicitly provided.
+
+`kindship site analytics <site-name>` reads Kindship-managed site analytics
+through normal Kindship auth. It does not require direct Umami credentials.
 
 ### Videos
 

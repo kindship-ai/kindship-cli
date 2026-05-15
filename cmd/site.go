@@ -33,6 +33,7 @@ Subcommands:
   push     Upload project files
   push-status Check a durable push attempt
   logs     View build logs
+  analytics Read site analytics
   verify   Verify the canonical domain serves the site
   delete   Delete a site
   domain   Manage custom domains`,
@@ -127,6 +128,22 @@ Examples:
   kindship site logs my-app --format json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSiteLogs,
+}
+
+var siteAnalyticsCmd = &cobra.Command{
+	Use:   "analytics <name>",
+	Short: "Read site analytics",
+	Long: `Read Kindship-managed analytics for a hosted site.
+
+The command uses normal Kindship authentication and does not require direct
+Umami credentials.
+
+Examples:
+  kindship site analytics my-app
+  kindship site analytics my-app --range 30d --metric referrer
+  kindship site analytics my-app --format json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSiteAnalytics,
 }
 
 var siteVerifyCmd = &cobra.Command{
@@ -254,6 +271,10 @@ var (
 	pushWaitTimeout int
 	logsBuild       int
 	verifyRoute     string
+	analyticsRange  string
+	analyticsUnit   string
+	analyticsMetric string
+	analyticsLimit  int
 )
 
 const containerSiteWorkspaceRoot = "/workspace/sites"
@@ -275,6 +296,12 @@ func init() {
 	sitePushCmd.Flags().IntVar(&pushWaitTimeout, "wait-timeout", 300, "Max seconds to wait for build completion when --wait is set. Default 300.")
 
 	siteLogsCmd.Flags().IntVar(&logsBuild, "build", 0, "Build number (default: latest)")
+
+	siteAnalyticsCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
+	siteAnalyticsCmd.Flags().StringVar(&analyticsRange, "range", "7d", "Time range (24h, 7d, 30d, 90d)")
+	siteAnalyticsCmd.Flags().StringVar(&analyticsUnit, "unit", "", "Time bucket unit (hour, day, month). Defaults from range")
+	siteAnalyticsCmd.Flags().StringVar(&analyticsMetric, "metric", "path", "Metric dimension (path, referrer, country, browser, device, event)")
+	siteAnalyticsCmd.Flags().IntVar(&analyticsLimit, "limit", 20, "Number of metric rows to return (1-500)")
 
 	siteVerifyCmd.Flags().StringVar(&siteFormat, "format", "text", "Output format (json, text)")
 	siteVerifyCmd.Flags().StringVar(&verifyRoute, "route", "", "Optional relative route to GET (e.g. /about). Reports route_status separately from edge / sitemap.")
@@ -301,6 +328,7 @@ func init() {
 	siteCmd.AddCommand(sitePushStatusCmd)
 	siteCmd.AddCommand(sitePushCmd)
 	siteCmd.AddCommand(siteLogsCmd)
+	siteCmd.AddCommand(siteAnalyticsCmd)
 	siteCmd.AddCommand(siteVerifyCmd)
 	siteCmd.AddCommand(siteDeleteCmd)
 	siteCmd.AddCommand(siteDomainCmd)
@@ -1565,6 +1593,220 @@ func runSiteLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+type siteAnalyticsCombinedResponse struct {
+	Site    api.SiteAnalyticsSite  `json:"site"`
+	Range   api.SiteAnalyticsRange `json:"range"`
+	Summary map[string]interface{} `json:"summary"`
+	Metric  string                 `json:"metric"`
+	Limit   int                    `json:"limit"`
+	Metrics []interface{}          `json:"metrics"`
+}
+
+func runSiteAnalytics(cmd *cobra.Command, args []string) error {
+	ctx, err := auth.GetAuthContext()
+	if err != nil {
+		return err
+	}
+
+	agentID, err := ctx.RequireAgentID()
+	if err != nil {
+		return err
+	}
+
+	siteName := args[0]
+	summaryResp, err := fetchSiteAnalyticsSummary(ctx, siteName, agentID)
+	if err != nil {
+		return err
+	}
+
+	metricsResp, err := fetchSiteAnalyticsMetrics(ctx, siteName, agentID)
+	if err != nil {
+		return err
+	}
+
+	output := siteAnalyticsCombinedResponse{
+		Site:    summaryResp.Site,
+		Range:   summaryResp.Range,
+		Summary: summaryResp.Summary,
+		Metric:  metricsResp.Metric,
+		Limit:   metricsResp.Limit,
+		Metrics: metricsResp.Metrics,
+	}
+
+	if siteFormat == "json" {
+		return printJSON(output)
+	}
+
+	return renderSiteAnalytics(output)
+}
+
+func fetchSiteAnalyticsSummary(ctx *auth.Context, siteName, agentID string) (*api.SiteAnalyticsSummaryResponse, error) {
+	query := siteAnalyticsBaseQuery(siteName, agentID)
+	var out api.SiteAnalyticsSummaryResponse
+	if err := fetchSiteAnalyticsEndpoint(ctx, "/api/cli/site/analytics/summary", query, &out); err != nil {
+		return nil, fmt.Errorf("failed to get site analytics summary: %w", err)
+	}
+	return &out, nil
+}
+
+func fetchSiteAnalyticsMetrics(ctx *auth.Context, siteName, agentID string) (*api.SiteAnalyticsMetricsResponse, error) {
+	query := siteAnalyticsBaseQuery(siteName, agentID)
+	query.Set("metric", analyticsMetric)
+	query.Set("limit", fmt.Sprintf("%d", analyticsLimit))
+
+	var out api.SiteAnalyticsMetricsResponse
+	if err := fetchSiteAnalyticsEndpoint(ctx, "/api/cli/site/analytics/metrics", query, &out); err != nil {
+		return nil, fmt.Errorf("failed to get site analytics metrics: %w", err)
+	}
+	return &out, nil
+}
+
+func siteAnalyticsBaseQuery(siteName, agentID string) url.Values {
+	query := url.Values{}
+	query.Set("site_name", siteName)
+	query.Set("agent_id", agentID)
+	query.Set("range", analyticsRange)
+	if analyticsUnit != "" {
+		query.Set("unit", analyticsUnit)
+	}
+	return query
+}
+
+func fetchSiteAnalyticsEndpoint[T any](ctx *auth.Context, path string, query url.Values, out *T) error {
+	endpoint := fmt.Sprintf("%s%s?%s", ctx.APIBaseURL, path, query.Encode())
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ctx.SetAuthHeaders(req)
+	req.Header.Set("X-Kindship-CLI-Version", Version)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if err := handleNonJSONResponse(resp.StatusCode, body); err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	return nil
+}
+
+func renderSiteAnalytics(resp siteAnalyticsCombinedResponse) error {
+	fmt.Printf("Site analytics: %s\n", resp.Site.SiteName)
+	fmt.Printf("  Domain:  %s\n", resp.Site.Domain)
+	fmt.Printf("  Range:   %s (%s)\n", resp.Range.Range, resp.Range.Unit)
+	fmt.Printf("  Window:  %s to %s\n", formatAnalyticsMs(resp.Range.StartAt), formatAnalyticsMs(resp.Range.EndAt))
+
+	if len(resp.Summary) > 0 {
+		fmt.Printf("  Visitors:  %s\n", formatAnalyticsNumber(resp.Summary["visitors"]))
+		fmt.Printf("  Visits:    %s\n", formatAnalyticsNumber(resp.Summary["visits"]))
+		fmt.Printf("  Pageviews: %s\n", formatAnalyticsNumber(resp.Summary["pageviews"]))
+		fmt.Printf("  Bounces:   %s\n", formatAnalyticsNumber(resp.Summary["bounces"]))
+	}
+
+	if len(resp.Metrics) == 0 {
+		fmt.Printf("\nNo %s metrics found.\n", resp.Metric)
+		return nil
+	}
+
+	fmt.Printf("\nTop %s\n", resp.Metric)
+	for _, row := range resp.Metrics {
+		label, value := analyticsMetricLabelAndValue(row)
+		fmt.Printf("  %-40s %s\n", label, value)
+	}
+	return nil
+}
+
+func analyticsMetricLabelAndValue(row interface{}) (string, string) {
+	fields, ok := row.(map[string]interface{})
+	if !ok {
+		return fmt.Sprintf("%v", row), ""
+	}
+
+	label := firstString(fields, "x", "name", "value", "url", "path")
+	if label == "" {
+		label = "(unknown)"
+	}
+
+	value := firstNumber(fields, "y", "views", "visitors", "count", "visits")
+	if value == "" {
+		value = formatAnalyticsNumber(fields["value"])
+	}
+
+	return label, value
+}
+
+func firstString(fields map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := fields[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNumber(fields map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := fields[key]; ok {
+			formatted := formatAnalyticsNumber(value)
+			if formatted != "-" {
+				return formatted
+			}
+		}
+	}
+	return ""
+}
+
+func formatAnalyticsNumber(value interface{}) string {
+	switch v := value.(type) {
+	case float64:
+		return fmt.Sprintf("%.0f", v)
+	case float32:
+		return fmt.Sprintf("%.0f", v)
+	case int:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case json.Number:
+		return v.String()
+	case string:
+		if v != "" {
+			return v
+		}
+	}
+	return "-"
+}
+
+func formatAnalyticsMs(ms int64) string {
+	if ms <= 0 {
+		return "-"
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
 func runSiteDelete(cmd *cobra.Command, args []string) error {

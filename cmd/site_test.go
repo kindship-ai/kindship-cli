@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -391,6 +392,106 @@ func TestFetchAndRenderSitePushStatus(t *testing.T) {
 		}
 	})
 	for _, want := range []string{"Push attempt: attempt-xyz", "Status:  failed", "Code:    ARCHIVE_TOO_LARGE", "Archive: 3 files"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("rendered output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestFetchSiteAnalyticsUsesKindshipAuthAndQuery(t *testing.T) {
+	var sawSummaryAuth string
+	var sawMetricsAuth string
+	var sawSummaryQuery string
+	var sawMetricsQuery string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/cli/site/analytics/summary":
+			sawSummaryAuth = r.Header.Get("Authorization")
+			sawSummaryQuery = r.URL.RawQuery
+			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"summary":{"visitors":3,"visits":4,"pageviews":5,"bounces":1}}`))
+		case "/api/cli/site/analytics/metrics":
+			sawMetricsAuth = r.Header.Get("Authorization")
+			sawMetricsQuery = r.URL.RawQuery
+			_, _ = w.Write([]byte(`{"site":{"id":"site-1","site_name":"demo-site","domain":"demo.kindship.site","custom_domain":null,"analytics_website_id":"website-1"},"range":{"range":"7d","start_at":1000,"end_at":2000,"unit":"day"},"metric":"referrer","limit":10,"metrics":[{"x":"https://example.com","y":2}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ctx := &auth.Context{Method: auth.AuthMethodOAuth, Token: "cli-token", AgentID: "agent-1", APIBaseURL: server.URL}
+	analyticsRange = "7d"
+	analyticsUnit = "day"
+	analyticsMetric = "referrer"
+	analyticsLimit = 10
+
+	summary, err := fetchSiteAnalyticsSummary(ctx, "demo-site", "agent-1")
+	if err != nil {
+		t.Fatalf("fetchSiteAnalyticsSummary returned error: %v", err)
+	}
+	metrics, err := fetchSiteAnalyticsMetrics(ctx, "demo-site", "agent-1")
+	if err != nil {
+		t.Fatalf("fetchSiteAnalyticsMetrics returned error: %v", err)
+	}
+
+	if sawSummaryAuth != "Bearer cli-token" || sawMetricsAuth != "Bearer cli-token" {
+		t.Fatalf("expected bearer auth, got summary=%q metrics=%q", sawSummaryAuth, sawMetricsAuth)
+	}
+	for _, rawQuery := range []string{sawSummaryQuery, sawMetricsQuery} {
+		values, err := url.ParseQuery(rawQuery)
+		if err != nil {
+			t.Fatalf("failed to parse query %q: %v", rawQuery, err)
+		}
+		if values.Get("site_name") != "demo-site" || values.Get("agent_id") != "agent-1" || values.Get("range") != "7d" || values.Get("unit") != "day" {
+			t.Fatalf("unexpected query values: %#v", values)
+		}
+	}
+	metricValues, _ := url.ParseQuery(sawMetricsQuery)
+	if metricValues.Get("metric") != "referrer" || metricValues.Get("limit") != "10" {
+		t.Fatalf("unexpected metrics query values: %#v", metricValues)
+	}
+
+	if summary.Summary["pageviews"].(float64) != 5 {
+		t.Fatalf("summary did not parse pageviews: %#v", summary.Summary)
+	}
+	if metrics.Metric != "referrer" || len(metrics.Metrics) != 1 {
+		t.Fatalf("metrics did not parse: %#v", metrics)
+	}
+}
+
+func TestRenderSiteAnalyticsShowsSummaryAndMetrics(t *testing.T) {
+	output := captureStdout(t, func() {
+		err := renderSiteAnalytics(siteAnalyticsCombinedResponse{
+			Site: api.SiteAnalyticsSite{
+				SiteName: "demo-site",
+				Domain:   "demo.kindship.site",
+			},
+			Range: api.SiteAnalyticsRange{
+				Range:   "7d",
+				StartAt: 1_700_000_000_000,
+				EndAt:   1_700_086_400_000,
+				Unit:    "day",
+			},
+			Summary: map[string]interface{}{
+				"visitors":  float64(3),
+				"visits":    float64(4),
+				"pageviews": float64(5),
+				"bounces":   float64(1),
+			},
+			Metric: "path",
+			Limit:  20,
+			Metrics: []interface{}{
+				map[string]interface{}{"x": "/", "y": float64(5)},
+			},
+		})
+		if err != nil {
+			t.Fatalf("renderSiteAnalytics returned error: %v", err)
+		}
+	})
+
+	for _, want := range []string{"Site analytics: demo-site", "Visitors:  3", "Pageviews: 5", "Top path", "/"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("rendered output missing %q:\n%s", want, output)
 		}
