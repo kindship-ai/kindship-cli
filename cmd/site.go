@@ -883,7 +883,7 @@ func runSiteCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("✓ Created site %q\n", site.SiteName)
-	fmt.Printf("  Domain:  %s\n", site.Domain)
+	fmt.Printf("  Domain:  %s\n", preferredSiteDomain(site.Domain, site.CustomDomain))
 	fmt.Printf("  Status:  %s\n", site.Status)
 	fmt.Printf("  Local:   %s\n", workspaceDir)
 	if site.GiteaRepoURL != nil {
@@ -957,17 +957,13 @@ func runSiteList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Table header
-	fmt.Printf("%-16s %-32s %-10s %-24s %s\n", "NAME", "DOMAIN", "STATUS", "CUSTOM DOMAIN", "LAST DEPLOY")
+	fmt.Printf("%-16s %-32s %-10s %s\n", "NAME", "DOMAIN", "STATUS", "LAST DEPLOY")
 	for _, site := range listResp.Sites {
 		lastDeploy := "-"
 		if site.LastDeployAt != nil {
 			lastDeploy = formatRelativeTime(*site.LastDeployAt)
 		}
-		customDomain := ""
-		if site.CustomDomain != nil {
-			customDomain = *site.CustomDomain
-		}
-		fmt.Printf("%-16s %-32s %-10s %-24s %s\n", site.SiteName, site.Domain, site.Status, customDomain, lastDeploy)
+		fmt.Printf("%-16s %-32s %-10s %s\n", site.SiteName, preferredSiteDomain(site.Domain, site.CustomDomain), site.Status, lastDeploy)
 	}
 
 	return nil
@@ -1028,7 +1024,7 @@ func runSiteStatus(cmd *cobra.Command, args []string) error {
 
 	site := statusResp.Site
 	fmt.Printf("Site: %s\n", site.SiteName)
-	fmt.Printf("  Domain:  %s\n", site.Domain)
+	fmt.Printf("  Domain:  %s\n", preferredSiteDomain(site.Domain, site.CustomDomain))
 	fmt.Printf("  Status:  %s\n", site.Status)
 	if served := statusResp.ServedDeploy; served != nil {
 		fmt.Printf("  Served:  %s\n", servedDeployLabel(served))
@@ -1046,8 +1042,8 @@ func runSiteStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("  Latest build: none\n")
 	}
-	if site.CustomDomain != nil {
-		fmt.Printf("  Custom:  %s\n", *site.CustomDomain)
+	if hasCustomSiteDomain(site.Domain, site.CustomDomain) {
+		fmt.Printf("  Subdomain: %s (also valid)\n", site.Domain)
 	}
 	if site.LastError != nil {
 		fmt.Printf("  Error:   %s\n", *site.LastError)
@@ -1803,7 +1799,7 @@ func fetchSiteAnalyticsEndpoint[T any](ctx *auth.Context, path string, query url
 func renderSiteAnalytics(resp siteAnalyticsCombinedResponse) error {
 	summary := analyticsStatsMap(resp.Summary)
 	fmt.Printf("Site analytics: %s\n", resp.Site.SiteName)
-	fmt.Printf("  Domain:  %s\n", resp.Site.Domain)
+	fmt.Printf("  Domain:  %s\n", preferredSiteDomain(resp.Site.Domain, resp.Site.CustomDomain))
 	fmt.Printf("  Range:   %s (%s)\n", resp.Range.Range, resp.Range.Unit)
 	fmt.Printf("  Window:  %s to %s\n", formatAnalyticsMs(resp.Range.StartAt), formatAnalyticsMs(resp.Range.EndAt))
 
@@ -1846,7 +1842,7 @@ func renderSiteAnalytics(resp siteAnalyticsCombinedResponse) error {
 func renderSiteAnalyticsReport(resp siteAnalyticsCombinedResponse) error {
 	summary := analyticsStatsMap(resp.Summary)
 	fmt.Printf("Site analytics report: %s\n", resp.Site.SiteName)
-	fmt.Printf("  Domain:  %s\n", resp.Site.Domain)
+	fmt.Printf("  Domain:  %s\n", preferredSiteDomain(resp.Site.Domain, resp.Site.CustomDomain))
 	fmt.Printf("  Range:   %s (%s)\n", resp.Range.Range, resp.Range.Unit)
 	fmt.Printf("  Window:  %s to %s\n", formatAnalyticsMs(resp.Range.StartAt), formatAnalyticsMs(resp.Range.EndAt))
 	fmt.Printf("\nTraffic\n")
@@ -1933,6 +1929,21 @@ func analyticsStatsMap(fields map[string]interface{}) map[string]interface{} {
 		return data
 	}
 	return fields
+}
+
+func preferredSiteDomain(domain string, customDomain *string) string {
+	if hasCustomSiteDomain(domain, customDomain) {
+		return strings.TrimSpace(*customDomain)
+	}
+	return domain
+}
+
+func hasCustomSiteDomain(domain string, customDomain *string) bool {
+	if customDomain == nil {
+		return false
+	}
+	custom := strings.TrimSpace(*customDomain)
+	return custom != "" && !strings.EqualFold(custom, strings.TrimSpace(domain))
 }
 
 func renderAnalyticsRows(rows []interface{}) {

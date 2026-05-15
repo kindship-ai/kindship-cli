@@ -511,11 +511,13 @@ func TestFetchSiteAnalyticsUsesKindshipAuthAndQuery(t *testing.T) {
 }
 
 func TestRenderSiteAnalyticsShowsSummaryAndMetrics(t *testing.T) {
+	customDomain := "demo.example.com"
 	output := captureStdout(t, func() {
 		err := renderSiteAnalytics(siteAnalyticsCombinedResponse{
 			Site: api.SiteAnalyticsSite{
-				SiteName: "demo-site",
-				Domain:   "demo.kindship.site",
+				SiteName:     "demo-site",
+				Domain:       "demo.kindship.site",
+				CustomDomain: &customDomain,
 			},
 			Range: api.SiteAnalyticsRange{
 				Range:   "7d",
@@ -551,10 +553,29 @@ func TestRenderSiteAnalyticsShowsSummaryAndMetrics(t *testing.T) {
 		}
 	})
 
-	for _, want := range []string{"Site analytics: demo-site", "Visitors:  3", "Pageviews: 5", "Top path", "/", "Events", "cta-click"} {
+	for _, want := range []string{"Site analytics: demo-site", "Domain:  demo.example.com", "Visitors:  3", "Pageviews: 5", "Top path", "/", "Events", "cta-click"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("rendered output missing %q:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, "demo.kindship.site") {
+		t.Fatalf("analytics output should not include platform subdomain when custom domain exists:\n%s", output)
+	}
+}
+
+func TestPreferredSiteDomain(t *testing.T) {
+	customDomain := " demo.example.com "
+	if got := preferredSiteDomain("demo.kindship.site", &customDomain); got != "demo.example.com" {
+		t.Fatalf("expected custom domain, got %q", got)
+	}
+
+	sameDomain := "demo.kindship.site"
+	if got := preferredSiteDomain("demo.kindship.site", &sameDomain); got != "demo.kindship.site" {
+		t.Fatalf("expected platform domain when custom domain matches, got %q", got)
+	}
+
+	if got := preferredSiteDomain("demo.kindship.site", nil); got != "demo.kindship.site" {
+		t.Fatalf("expected platform domain without custom domain, got %q", got)
 	}
 }
 
