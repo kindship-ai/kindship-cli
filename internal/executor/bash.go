@@ -43,7 +43,9 @@ func ExecuteBashStreamingWithContext(ctx context.Context, entity *api.PlanningEn
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, "sh", "-c", *entity.Code)
-	cmd.Dir = "/workspace"
+	if _, err := os.Stat("/workspace"); err == nil {
+		cmd.Dir = "/workspace"
+	}
 	cmd.Env = buildEnvWithInputs(inputs)
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -103,7 +105,9 @@ func ExecuteBashWithContext(ctx context.Context, entity *api.PlanningEntity, inp
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, "sh", "-c", *entity.Code)
-	cmd.Dir = "/workspace"
+	if _, err := os.Stat("/workspace"); err == nil {
+		cmd.Dir = "/workspace"
+	}
 	cmd.Env = buildEnvWithInputs(inputs)
 
 	var stdout, stderr bytes.Buffer

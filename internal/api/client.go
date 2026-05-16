@@ -174,6 +174,44 @@ func (c *Client) FetchEntityForExecution(entityID, serviceKey string) (*EntityEx
 	return &entityResp, nil
 }
 
+// FetchBackgroundTaskForExecution retrieves a background task for execution.
+func (c *Client) FetchBackgroundTaskForExecution(taskID, serviceKey string) (*EntityExecuteResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/background-tasks/%s/execute", c.baseURL, taskID)
+	c.log("Fetching background task for execution: %s", endpoint)
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var entityResp EntityExecuteResponse
+	if err := json.Unmarshal(body, &entityResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Successfully fetched background task: %s", entityResp.Entity.Title)
+	return &entityResp, nil
+}
+
 // FetchHeartbeatForExecution retrieves a heartbeat assignment for execution.
 func (c *Client) FetchHeartbeatForExecution(scheduleID, serviceKey string) (*EntityExecuteResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/heartbeats/%s/execute", c.baseURL, scheduleID)
@@ -253,6 +291,50 @@ func (c *Client) StartExecution(req ExecutionStartRequest, serviceKey string) (*
 	}
 
 	c.log("Started execution: %s (attempt %d)", startResp.ExecutionID, startResp.AttemptNumber)
+	return &startResp, nil
+}
+
+// StartBackgroundTaskExecution creates a new background-task run.
+func (c *Client) StartBackgroundTaskExecution(req BackgroundTaskExecutionStartRequest, serviceKey string) (*ExecutionStartResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/background-tasks/execution/start", c.baseURL)
+	c.log("Starting background task execution: %s", req.BackgroundTaskID)
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("X-Kindship-Service-Key", serviceKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var startResp ExecutionStartResponse
+	if err := json.Unmarshal(body, &startResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Started background task execution: %s (attempt %d)", startResp.ExecutionID, startResp.AttemptNumber)
 	return &startResp, nil
 }
 
@@ -389,6 +471,50 @@ func (c *Client) CompleteExecution(executionID string, req ExecutionCompleteRequ
 	return &completeResp, nil
 }
 
+// CompleteBackgroundTaskExecution marks a background-task run as complete.
+func (c *Client) CompleteBackgroundTaskExecution(executionID string, req ExecutionCompleteRequest, serviceKey string) (*ExecutionCompleteResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/background-tasks/execution/%s/complete", c.baseURL, executionID)
+	c.log("Completing background task execution: %s (status: %s)", executionID, req.Status)
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("X-Kindship-Service-Key", serviceKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var completeResp ExecutionCompleteResponse
+	if err := json.Unmarshal(body, &completeResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	c.log("Background task execution completed successfully")
+	return &completeResp, nil
+}
+
 // CompleteHeartbeatExecution marks a heartbeat run as complete.
 func (c *Client) CompleteHeartbeatExecution(executionID string, req ExecutionCompleteRequest, serviceKey string) (*ExecutionCompleteResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/heartbeats/execution/%s/complete", c.baseURL, executionID)
@@ -486,7 +612,20 @@ func (c *Client) SendLogLines(executionID string, lines []LogLine, serviceKey st
 	}
 
 	endpoint := fmt.Sprintf("%s/api/planning/execution/%s/logs", c.baseURL, executionID)
+	return c.sendLogLinesToEndpoint(endpoint, executionID, lines, serviceKey)
+}
 
+// SendBackgroundTaskLogLines sends log lines for a background-task run.
+func (c *Client) SendBackgroundTaskLogLines(executionID string, lines []LogLine, serviceKey string) error {
+	if len(lines) == 0 {
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("%s/api/background-tasks/execution/%s/logs", c.baseURL, executionID)
+	return c.sendLogLinesToEndpoint(endpoint, executionID, lines, serviceKey)
+}
+
+func (c *Client) sendLogLinesToEndpoint(endpoint string, executionID string, lines []LogLine, serviceKey string) error {
 	jsonData, err := json.Marshal(SendLogLinesRequest{Lines: lines})
 	if err != nil {
 		return fmt.Errorf("failed to marshal log lines: %w", err)

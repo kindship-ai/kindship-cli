@@ -111,6 +111,14 @@ type ExecutionStartRequest struct {
 	ParentRun           string        `json:"parent_run,omitempty"`
 }
 
+// BackgroundTaskExecutionStartRequest starts a background-task run.
+type BackgroundTaskExecutionStartRequest struct {
+	BackgroundTaskID string `json:"background_task_id"`
+	AgentID          string `json:"agent_id"`
+	CLI              string `json:"cli,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
+}
+
 // HeartbeatExecutionStartRequest starts a heartbeat schedule run.
 type HeartbeatExecutionStartRequest struct {
 	ScheduleID string `json:"schedule_id"`

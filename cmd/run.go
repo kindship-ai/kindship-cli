@@ -27,6 +27,7 @@ var (
 	sessionID              string
 	resume                 bool
 	sessionRetryOnConflict bool
+	backgroundTaskRun      bool
 )
 
 var runCmd = &cobra.Command{
@@ -48,10 +49,15 @@ Configuration (flags take precedence over environment variables):
   --agent-id / AGENT_ID - The agent container ID
   --service-key / KINDSHIP_SERVICE_KEY - Service key for authentication
   --api-url / KINDSHIP_API_URL - API base URL (defaults to https://kindship.ai)
+  --background-task - Treat the id as an agent_background_tasks.id and use the
+    background-task execution API instead of planning entity execution routes
 
 Examples:
   # Execute a single task
   kindship run 550e8400-e29b-41d4-a716-446655440000
+
+  # Execute a background task dispatched by Hatchet
+  kindship run 550e8400-e29b-41d4-a716-446655440000 --background-task
 
   # Execute all tasks in a Process
   kindship run 660e8400-e29b-41d4-a716-446655440000`,
@@ -100,6 +106,27 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	// Create API client
 	client := api.NewClient(apiURL, verbose)
 
+	if backgroundTaskRun {
+		success, err := executeEntity(EntityExecutionParams{
+			EntityID:               entityID,
+			AgentID:                agentID,
+			ServiceKey:             serviceKey,
+			Client:                 client,
+			Log:                    log,
+			SessionID:              sessionID,
+			Resume:                 resume,
+			SessionRetryOnConflict: sessionRetryOnConflict,
+			BackgroundTask:         true,
+		})
+		if err != nil {
+			return err
+		}
+		if !success {
+			os.Exit(1)
+		}
+		return nil
+	}
+
 	// Fetch entity to detect type before execution
 	log.Info("Fetching entity to detect type", map[string]interface{}{
 		"entity_id": entityID,
@@ -146,15 +173,16 @@ func runExecute(cmd *cobra.Command, args []string) error {
 // EntityExecutionParams holds parameters for executing an entity.
 // Used by both `kindship run <id>` and the agent loop.
 type EntityExecutionParams struct {
-	EntityID                string
-	AgentID                 string
-	ServiceKey              string
-	Client                  *api.Client
-	Log                     *logging.Logger
-	ParentRunID             string // ORCHESTRATE run ID (empty for top-level runs)
-	SessionID               string // Claude Code session ID for session continuity
-	Resume                  bool   // Resume existing session (--resume flag)
-	SessionRetryOnConflict  bool   // Retry on "Session ID already in use" (Claude only)
+	EntityID               string
+	AgentID                string
+	ServiceKey             string
+	Client                 *api.Client
+	Log                    *logging.Logger
+	ParentRunID            string // ORCHESTRATE run ID (empty for top-level runs)
+	SessionID              string // Claude Code session ID for session continuity
+	Resume                 bool   // Resume existing session (--resume flag)
+	SessionRetryOnConflict bool   // Retry on "Session ID already in use" (Claude only)
+	BackgroundTask         bool   // Use background-task execution API, not planning entity routes
 }
 
 // executeEntity runs the full execution lifecycle for a single entity.
@@ -171,7 +199,13 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	// Step 1: Fetch entity details
 	log.Info("Fetching entity details")
 	fetchStart := time.Now()
-	entityResp, err := params.Client.FetchEntityForExecution(params.EntityID, params.ServiceKey)
+	var entityResp *api.EntityExecuteResponse
+	var err error
+	if params.BackgroundTask {
+		entityResp, err = params.Client.FetchBackgroundTaskForExecution(params.EntityID, params.ServiceKey)
+	} else {
+		entityResp, err = params.Client.FetchEntityForExecution(params.EntityID, params.ServiceKey)
+	}
 	if err != nil {
 		log.Error("Failed to fetch entity", err, map[string]interface{}{
 			"duration_ms": time.Since(fetchStart).Milliseconds(),
@@ -234,15 +268,26 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 
 	// Step 3: Create run
 	log.Info("Creating run")
-	startExecReq := api.ExecutionStartRequest{
-		EntityID:      params.EntityID,
-		ExecutionMode: entityResp.Entity.ExecutionMode,
-		AgentID:       params.AgentID,
-		CLI:           os.Getenv("INNER_LOOP_CLI"),
-		ParentRun:     params.ParentRunID,
-		SessionID:     params.SessionID,
+	var startResp *api.ExecutionStartResponse
+	if params.BackgroundTask {
+		startExecReq := api.BackgroundTaskExecutionStartRequest{
+			BackgroundTaskID: params.EntityID,
+			AgentID:          params.AgentID,
+			CLI:              os.Getenv("INNER_LOOP_CLI"),
+			SessionID:        params.SessionID,
+		}
+		startResp, err = params.Client.StartBackgroundTaskExecution(startExecReq, params.ServiceKey)
+	} else {
+		startExecReq := api.ExecutionStartRequest{
+			EntityID:      params.EntityID,
+			ExecutionMode: entityResp.Entity.ExecutionMode,
+			AgentID:       params.AgentID,
+			CLI:           os.Getenv("INNER_LOOP_CLI"),
+			ParentRun:     params.ParentRunID,
+			SessionID:     params.SessionID,
+		}
+		startResp, err = params.Client.StartExecution(startExecReq, params.ServiceKey)
 	}
-	startResp, err := params.Client.StartExecution(startExecReq, params.ServiceKey)
 	if err != nil {
 		log.Error("Failed to start execution", err)
 		return false, fmt.Errorf("failed to start execution: %w", err)
@@ -262,6 +307,9 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 
 	// Create log line sender for real-time streaming
 	logSender := func(lines []api.LogLine) error {
+		if params.BackgroundTask {
+			return params.Client.SendBackgroundTaskLogLines(startResp.ExecutionID, lines, params.ServiceKey)
+		}
 		return params.Client.SendLogLines(startResp.ExecutionID, lines, params.ServiceKey)
 	}
 
@@ -454,7 +502,11 @@ func executeEntity(params EntityExecutionParams) (bool, error) {
 	log.Info("Completing execution", map[string]interface{}{
 		"status": completeReq.Status,
 	})
-	_, err = params.Client.CompleteExecution(executionID, completeReq, params.ServiceKey)
+	if params.BackgroundTask {
+		_, err = params.Client.CompleteBackgroundTaskExecution(executionID, completeReq, params.ServiceKey)
+	} else {
+		_, err = params.Client.CompleteExecution(executionID, completeReq, params.ServiceKey)
+	}
 	if err != nil {
 		log.Error("Failed to complete execution", err)
 		return false, fmt.Errorf("failed to complete execution: %w", err)
@@ -801,4 +853,5 @@ func init() {
 	runCmd.Flags().StringVar(&sessionID, "session-id", "", "Claude Code session ID for session continuity")
 	runCmd.Flags().BoolVar(&resume, "resume", false, "Resume a session. With --session-id: Claude (resume that id). Without: non-Claude CLIs pick their 'continue last' flag.")
 	runCmd.Flags().BoolVar(&sessionRetryOnConflict, "session-retry-on-conflict", false, "Retry up to 3x with jittered backoff on 'Session ID already in use' (Claude only; see internal/executor/agent.go)")
+	runCmd.Flags().BoolVar(&backgroundTaskRun, "background-task", false, "Execute an agent background task using background-task API routes")
 }
