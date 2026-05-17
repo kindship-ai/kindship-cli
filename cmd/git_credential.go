@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +15,7 @@ import (
 )
 
 const giteaCredentialHost = "gitea.kindship.ai"
+const defaultKindshipAPIURL = "https://kindship.ai"
 
 var gitCredentialCmd = &cobra.Command{
 	Use:    "git-credential",
@@ -80,27 +82,29 @@ func runGitCredentialGitea(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	if input.Host != giteaCredentialHost {
-		return nil
+	agentID := os.Getenv("AGENT_ID")
+	if agentID == "" {
+		return fmt.Errorf("AGENT_ID environment variable is required")
 	}
-	if input.Protocol != "http" && input.Protocol != "https" {
+
+	apiURL := os.Getenv("KINDSHIP_API_URL")
+	if apiURL == "" {
+		apiURL = defaultKindshipAPIURL
+	}
+
+	if input.Protocol != "https" {
 		return nil
 	}
 	if input.Path == "" {
 		return nil
 	}
-
-	agentID := os.Getenv("AGENT_ID")
-	if agentID == "" {
-		return fmt.Errorf("AGENT_ID environment variable is required")
+	if !isKindshipGitProxyCredential(input, apiURL, agentID) {
+		return nil
 	}
+
 	serviceKey := os.Getenv("KINDSHIP_SERVICE_KEY")
 	if serviceKey == "" {
 		return fmt.Errorf("KINDSHIP_SERVICE_KEY environment variable is required")
-	}
-	apiURL := os.Getenv("KINDSHIP_API_URL")
-	if apiURL == "" {
-		apiURL = "https://kindship.ai"
 	}
 
 	client := api.NewClient(apiURL, false)
@@ -118,6 +122,15 @@ func runGitCredentialGitea(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+func isKindshipGitProxyCredential(input gitCredentialInput, apiURL, agentID string) bool {
+	parsed, err := url.Parse(apiURL)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	expectedPrefix := fmt.Sprintf("api/agent-containers/%s/git-proxy/", agentID)
+	return input.Host == parsed.Host && strings.HasPrefix(strings.TrimPrefix(input.Path, "/"), expectedPrefix)
+}
+
 func runAuthGitea(args []string) error {
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
@@ -133,14 +146,37 @@ func execGitWithGiteaCredentials(gitArgs []string) error {
 	if err != nil {
 		return fmt.Errorf("command not found: git (check PATH)")
 	}
+	agentID := os.Getenv("AGENT_ID")
+	if agentID == "" {
+		return fmt.Errorf("AGENT_ID environment variable is required")
+	}
+	apiURL := os.Getenv("KINDSHIP_API_URL")
+	if apiURL == "" {
+		apiURL = defaultKindshipAPIURL
+	}
+	proxyPrefix, err := gitProxyPrefix(apiURL, agentID)
+	if err != nil {
+		return err
+	}
 	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	execArgs := append([]string{
 		"git",
 		"-c", "credential.helper=",
 		"-c", "credential.helper=!kindship git-credential gitea",
 		"-c", "credential.useHttpPath=true",
+		"-c", fmt.Sprintf("url.%s.insteadOf=https://%s/", proxyPrefix, giteaCredentialHost),
+		"-c", fmt.Sprintf("url.%s.insteadOf=http://%s/", proxyPrefix, giteaCredentialHost),
 	}, gitArgs...)
 	return syscall.Exec(executable, execArgs, env)
+}
+
+func gitProxyPrefix(apiURL, agentID string) (string, error) {
+	parsed, err := url.Parse(apiURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", fmt.Errorf("KINDSHIP_API_URL must be an https URL")
+	}
+	base := strings.TrimRight(parsed.String(), "/")
+	return fmt.Sprintf("%s/api/agent-containers/%s/git-proxy/", base, agentID), nil
 }
 
 func init() {
