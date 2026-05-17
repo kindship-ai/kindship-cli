@@ -28,6 +28,21 @@ type SecretsResponse struct {
 	Error string            `json:"error,omitempty"`
 }
 
+// GitCredentialRequest is the credential context Git passes to helpers.
+type GitCredentialRequest struct {
+	Protocol  string `json:"protocol"`
+	Host      string `json:"host"`
+	Path      string `json:"path"`
+	Operation string `json:"operation,omitempty"`
+}
+
+// GitCredentialResponse is the response from the Git credentials endpoint.
+type GitCredentialResponse struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Error    string `json:"error,omitempty"`
+}
+
 // log prints a message if verbose mode is enabled
 func (c *Client) log(format string, args ...interface{}) {
 	if c.verbose {
@@ -134,6 +149,51 @@ func (c *Client) FetchSecrets(agentID, command, serviceKey string) (map[string]s
 	c.log("Successfully parsed %d secrets", len(secretsResp.Env))
 
 	return secretsResp.Env, nil
+}
+
+// FetchGitCredential retrieves a process-scoped Git credential for an
+// agent-authorized Kindship-managed Git repository.
+func (c *Client) FetchGitCredential(agentID, serviceKey string, body GitCredentialRequest) (*GitCredentialResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/agent-containers/%s/git-credentials", c.baseURL, agentID)
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal credential request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("X-Kindship-Service-Key", serviceKey)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "kindship-cli/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var out GitCredentialResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, out.Error)
+		}
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody))
+	}
+	if out.Username == "" || out.Password == "" {
+		return nil, fmt.Errorf("credential response missing username or password")
+	}
+	return &out, nil
 }
 
 // FetchEntityForExecution retrieves a planning entity for execution

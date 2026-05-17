@@ -45,6 +45,10 @@ func runAuth(cmd *cobra.Command, args []string) error {
 	command := args[0]
 	commandArgs := args[1:]
 
+	if command == "gitea" {
+		return runAuthGitea(commandArgs)
+	}
+
 	// Read agent ID early so we can initialize logging
 	agentID := os.Getenv("AGENT_ID")
 
