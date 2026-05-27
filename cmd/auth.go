@@ -27,6 +27,7 @@ Example:
   kindship auth claude -p "what is 2+2"     # Claude headless mode
   kindship auth codex "fix this bug"
   kindship auth gemini "explain this code"
+  kindship auth vault -- ./scripts/use-token.sh
   kindship auth -v claude -p "debug mode"   # verbose logging`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runAuth,
@@ -44,8 +45,12 @@ func runAuth(cmd *cobra.Command, args []string) error {
 	startTime := time.Now()
 	command := args[0]
 	commandArgs := args[1:]
+	execCommand, execCommandArgs, err := parseAuthExec(command, commandArgs)
+	if err != nil {
+		return err
+	}
 
-	if command == "gitea" {
+	if command == "gitea" && execCommand == command {
 		return runAuthGitea(commandArgs)
 	}
 
@@ -57,7 +62,7 @@ func runAuth(cmd *cobra.Command, args []string) error {
 	defer log.FlushSync() // Ensure logs are sent before exit
 
 	log.Info("Starting auth", map[string]interface{}{
-		"args": commandArgs,
+		"args": execCommandArgs,
 	})
 
 	if agentID == "" {
@@ -112,13 +117,13 @@ func runAuth(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find the command executable
-	executable, err := exec.LookPath(command)
+	executable, err := exec.LookPath(execCommand)
 	if err != nil {
 		log.Error("Command not found in PATH", err, map[string]interface{}{
-			"command": command,
+			"command": execCommand,
 			"path":    os.Getenv("PATH"),
 		})
-		return fmt.Errorf("command not found: %s (check PATH)", command)
+		return fmt.Errorf("command not found: %s (check PATH)", execCommand)
 	}
 	log.Debug("Found executable", map[string]interface{}{"executable": executable})
 
@@ -126,14 +131,14 @@ func runAuth(cmd *cobra.Command, args []string) error {
 	setupDuration := time.Since(startTime)
 	log.WithDuration("Setup complete, executing command", setupDuration, map[string]interface{}{
 		"executable": executable,
-		"args":       commandArgs,
+		"args":       execCommandArgs,
 	})
 
 	// Flush logs before exec (exec replaces the process)
 	log.FlushSync()
 
 	// Exec the command (replaces the current process)
-	execArgs := append([]string{command}, commandArgs...)
+	execArgs := append([]string{execCommand}, execCommandArgs...)
 
 	// syscall.Exec replaces the current process entirely
 	// If it returns, an error occurred
@@ -158,7 +163,31 @@ func runAuth(cmd *cobra.Command, args []string) error {
 	}
 
 	errLog.FlushSync()
-	return fmt.Errorf("failed to exec %s: %w", command, execErr)
+	return fmt.Errorf("failed to exec %s: %w", execCommand, execErr)
+}
+
+func indexOf(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseAuthExec(
+	secretCommand string,
+	commandArgs []string,
+) (string, []string, error) {
+	if delimiter := indexOf(commandArgs, "--"); delimiter >= 0 {
+		execArgs := commandArgs[delimiter+1:]
+		if len(execArgs) == 0 {
+			return "", nil, fmt.Errorf("missing executable after --")
+		}
+		return execArgs[0], execArgs[1:], nil
+	}
+
+	return secretCommand, commandArgs, nil
 }
 
 func init() {
