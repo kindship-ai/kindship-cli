@@ -179,6 +179,10 @@ func parseAuthExec(
 	secretCommand string,
 	commandArgs []string,
 ) (string, []string, error) {
+	if secretCommand != "vault" {
+		return secretCommand, commandArgs, nil
+	}
+
 	if delimiter := indexOf(commandArgs, "--"); delimiter >= 0 {
 		execArgs := commandArgs[delimiter+1:]
 		if len(execArgs) == 0 {

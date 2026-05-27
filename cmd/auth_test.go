@@ -40,3 +40,35 @@ func TestParseAuthExecRejectsMissingExecutableAfterDelimiter(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestParseAuthExecPreservesDelimiterForNonVaultCommands(t *testing.T) {
+	execCommand, execArgs, err := parseAuthExec(
+		"npm",
+		[]string{"run", "--", "build"},
+	)
+	if err != nil {
+		t.Fatalf("parseAuthExec returned error: %v", err)
+	}
+	if execCommand != "npm" {
+		t.Fatalf("exec command = %q, want npm", execCommand)
+	}
+	if !reflect.DeepEqual(execArgs, []string{"run", "--", "build"}) {
+		t.Fatalf("exec args = %#v", execArgs)
+	}
+}
+
+func TestParseAuthExecPreservesGiteaWrapper(t *testing.T) {
+	execCommand, execArgs, err := parseAuthExec(
+		"gitea",
+		[]string{"--", "git", "clone", "repo"},
+	)
+	if err != nil {
+		t.Fatalf("parseAuthExec returned error: %v", err)
+	}
+	if execCommand != "gitea" {
+		t.Fatalf("exec command = %q, want gitea", execCommand)
+	}
+	if !reflect.DeepEqual(execArgs, []string{"--", "git", "clone", "repo"}) {
+		t.Fatalf("exec args = %#v", execArgs)
+	}
+}
